@@ -1,0 +1,361 @@
+[
+  {
+    "component": "L2.MLP",
+    "explanation": {
+      "component": "L2.MLP",
+      "candidate_function": "writes directly in the answer-token direction at the final position",
+      "relevant_contexts": [
+        "(contexts not yet narrowed - see next_experiment)"
+      ],
+      "supporting_evidence": [
+        "b8fb30682446",
+        "bc1f12c32cff",
+        "4e1dfca725ed",
+        "3e5b9b7ffbcd",
+        "e8ff8c9fe30c",
+        "5e07ef4e97ef"
+      ],
+      "contradictions": [
+        "ablation baselines disagree: zero_ablation=-1.830, mean_ablation=-2.143, resample_ablation=-5.015"
+      ],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L2.MLP"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "decrease",
+          "min_abs_effect": 0.8571731567382813,
+          "tolerance": 0.05,
+          "measured": -2.0573387145996094,
+          "passed": true
+        },
+        {
+          "method": "activation_patching",
+          "components": [
+            "L2.MLP"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "increase",
+          "min_abs_effect": 0.1,
+          "tolerance": 0.05,
+          "measured": 12.974845886230469,
+          "passed": true
+        }
+      ],
+      "next_experiment": "run path patching against the strongest downstream head to test whether anything reads this component's output",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L2.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.8571731567382813,
+        "tolerance": 0.05,
+        "measured": -2.0573387145996094,
+        "passed": true
+      },
+      {
+        "method": "activation_patching",
+        "components": [
+          "L2.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "increase",
+        "min_abs_effect": 0.1,
+        "tolerance": 0.05,
+        "measured": 12.974845886230469,
+        "passed": true
+      }
+    ],
+    "confidence": 0.75,
+    "updated_at": 1790409170.1035097
+  },
+  {
+    "component": "L2.H1",
+    "explanation": {
+      "component": "L2.H1",
+      "candidate_function": "induction-style copying (attends to the token after a previous occurrence of the current token); writes directly in the answer-token direction at the final position",
+      "relevant_contexts": [
+        "repeated-sequence / copying contexts"
+      ],
+      "supporting_evidence": [
+        "2a9df3824e15",
+        "7652e0d600b1",
+        "145acd53d676",
+        "53c8dd6ec1d3",
+        "5801e0965964",
+        "726f250662cf",
+        "8e4321f499f8",
+        "fc94d87b62ea"
+      ],
+      "contradictions": [],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L2.H1"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "decrease",
+          "min_abs_effect": 0.09325180053710938,
+          "tolerance": 0.05,
+          "measured": -0.1846294403076172,
+          "passed": true
+        }
+      ],
+      "next_experiment": "test on a prompt family with the repeat at a different offset to separate positional from content-based attention",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L2.H1"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.09325180053710938,
+        "tolerance": 0.05,
+        "measured": -0.1846294403076172,
+        "passed": true
+      }
+    ],
+    "confidence": 0.6666666666666666,
+    "updated_at": 1790409170.1144795
+  },
+  {
+    "component": "L2.H0",
+    "explanation": {
+      "component": "L2.H0",
+      "candidate_function": "induction-style copying (attends to the token after a previous occurrence of the current token); writes directly in the answer-token direction at the final position",
+      "relevant_contexts": [
+        "repeated-sequence / copying contexts"
+      ],
+      "supporting_evidence": [
+        "3dc7454837a9",
+        "37f4bae96516",
+        "d3f6473f49e0",
+        "c91789166663",
+        "61bddf1020ae",
+        "6981bd42a16d",
+        "20393f64a438",
+        "8baa7837b5ef"
+      ],
+      "contradictions": [],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L2.H0"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "decrease",
+          "min_abs_effect": 0.10654182434082032,
+          "tolerance": 0.05,
+          "measured": -0.19135093688964844,
+          "passed": true
+        }
+      ],
+      "next_experiment": "test on a prompt family with the repeat at a different offset to separate positional from content-based attention",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L2.H0"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.10654182434082032,
+        "tolerance": 0.05,
+        "measured": -0.19135093688964844,
+        "passed": true
+      }
+    ],
+    "confidence": 0.6666666666666666,
+    "updated_at": 1790409170.1244564
+  },
+  {
+    "component": "L2.H2",
+    "explanation": {
+      "component": "L2.H2",
+      "candidate_function": "induction-style copying (attends to the token after a previous occurrence of the current token); writes directly in the answer-token direction at the final position",
+      "relevant_contexts": [
+        "repeated-sequence / copying contexts"
+      ],
+      "supporting_evidence": [
+        "2f5ee7247de6",
+        "f2dc89fa7904",
+        "84d9d494a622",
+        "86b417af75c9",
+        "6a0967b0673e",
+        "edec732d24f8",
+        "f2f28ad3f8a3"
+      ],
+      "contradictions": [],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L2.H2"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "decrease",
+          "min_abs_effect": 0.08792724609375001,
+          "tolerance": 0.05,
+          "measured": -0.12000274658203125,
+          "passed": true
+        }
+      ],
+      "next_experiment": "test on a prompt family with the repeat at a different offset to separate positional from content-based attention",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L2.H2"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.08792724609375001,
+        "tolerance": 0.05,
+        "measured": -0.12000274658203125,
+        "passed": true
+      }
+    ],
+    "confidence": 0.6666666666666666,
+    "updated_at": 1790409170.1341665
+  },
+  {
+    "component": "L1.H4",
+    "explanation": {
+      "component": "L1.H4",
+      "candidate_function": "induction-style copying (attends to the token after a previous occurrence of the current token)",
+      "relevant_contexts": [
+        "repeated-sequence / copying contexts"
+      ],
+      "supporting_evidence": [
+        "7313a385fda7",
+        "dd80653cf7af",
+        "c5f5c055bbca",
+        "72b6ef0403cb",
+        "ac901f69111d",
+        "7b6f2c1616fc",
+        "2a8095f83712",
+        "8baa7837b5ef"
+      ],
+      "contradictions": [
+        "attention/readout pattern suggests task relevance, but measured ablation effects are small - pattern may be present-but-unused"
+      ],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L1.H4"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "no_change",
+          "min_abs_effect": 0.0,
+          "tolerance": 0.15,
+          "measured": -0.019483566284179688,
+          "passed": true
+        }
+      ],
+      "next_experiment": "test on a prompt family with the repeat at a different offset to separate positional from content-based attention",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L1.H4"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "no_change",
+        "min_abs_effect": 0.0,
+        "tolerance": 0.15,
+        "measured": -0.019483566284179688,
+        "passed": true
+      }
+    ],
+    "confidence": 0.6666666666666666,
+    "updated_at": 1790409170.1446629
+  },
+  {
+    "component": "L1.H3",
+    "explanation": {
+      "component": "L1.H3",
+      "candidate_function": "induction-style copying (attends to the token after a previous occurrence of the current token)",
+      "relevant_contexts": [
+        "repeated-sequence / copying contexts"
+      ],
+      "supporting_evidence": [
+        "323ebec252d7",
+        "39f34a0eb59f",
+        "fa53b2f8c971",
+        "b3dc307b070a",
+        "46fe9926141d",
+        "9751a28131c8",
+        "2a8095f83712",
+        "20393f64a438"
+      ],
+      "contradictions": [
+        "attention/readout pattern suggests task relevance, but measured ablation effects are small - pattern may be present-but-unused"
+      ],
+      "predictions": [
+        {
+          "method": "mean_ablation",
+          "components": [
+            "L1.H3"
+          ],
+          "family": "induction-heldout",
+          "metric": "logit_diff",
+          "expected_direction": "no_change",
+          "min_abs_effect": 0.0,
+          "tolerance": 0.15,
+          "measured": 0.0087432861328125,
+          "passed": true
+        }
+      ],
+      "next_experiment": "test on a prompt family with the repeat at a different offset to separate positional from content-based attention",
+      "source": "template"
+    },
+    "prediction_history": [
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L1.H3"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "no_change",
+        "min_abs_effect": 0.0,
+        "tolerance": 0.15,
+        "measured": 0.0087432861328125,
+        "passed": true
+      }
+    ],
+    "confidence": 0.6666666666666666,
+    "updated_at": 1790409170.155352
+  }
+]
