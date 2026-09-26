@@ -326,7 +326,7 @@ class HFAdapter(ModelAdapter):
     @classmethod
     def from_pretrained(cls, name_or_path: str, device="cpu", dtype=torch.float32):
         from transformers import AutoModelForCausalLM, AutoTokenizer  # lazy
-        model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype)
+        model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype, attn_implementation="eager")
         model.to(device)
         hc = model.config
         cfg = ModelConfig(
