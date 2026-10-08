@@ -1,8 +1,9 @@
 """Logging & inspection.
 
 TensorBoard handles the logging side (scalars, histograms, attention-score
-heat images, text summaries) when the `tensorboard` package is installed;
-otherwise the same payload is written as JSON so nothing is lost.
+heat images, text summaries, embeddings, and hparams) when the `tensorboard` 
+package is installed; otherwise the same payload is written as JSON so nothing 
+is lost.
 
 `write_inspection_html` builds the Rosetta inspection view described in the
 brief: select a component -> its stats, top examples with activation
@@ -16,17 +17,27 @@ from __future__ import annotations
 import html
 import json
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any, Union
 
 from ..schema import Explanation
 from ..store import EvidenceStore
 
 
 class Exporter:
+    """Rich TensorBoard exporter with graceful JSON degradation."""
+    
     def __init__(self, logdir: str):
         self.logdir = logdir
         os.makedirs(logdir, exist_ok=True)
-        self._json: Dict[str, Dict[str, float]] = {}
+        # Remove stale event files so TensorBoard doesn't see multiple runs
+        # in the same directory and merge/confuse them.
+        for fname in os.listdir(logdir):
+            if fname.startswith("events.out.tfevents"):
+                try:
+                    os.remove(os.path.join(logdir, fname))
+                except OSError:
+                    pass
+        self._json: Dict[str, Any] = {}
         try:
             from torch.utils.tensorboard import SummaryWriter  # needs tensorboard pkg
             self.writer = SummaryWriter(logdir)
@@ -34,26 +45,79 @@ class Exporter:
             self.writer = None
 
     def scalar(self, tag: str, value: float, step: int = 0):
-        self._json.setdefault(tag, {})[str(step)] = value
+        self._json.setdefault("scalars", {}).setdefault(tag, {})[str(step)] = value
         if self.writer:
             self.writer.add_scalar(tag, value, step)
 
-    def matrix(self, tag: str, mat, xlabel="", ylabel=""):
-        data = [[float(v) for v in row] for row in mat]
-        self._json[tag] = {"matrix": data, "xlabel": xlabel, "ylabel": ylabel}
+    def histogram(self, tag: str, values: List[float], step: int = 0):
+        self._json.setdefault("histograms", {}).setdefault(tag, {})[str(step)] = values
         if self.writer:
             try:
-                import torch
-                t = torch.tensor(data)
-                t = (t - t.min()) / (t.max() - t.min() + 1e-9)
-                self.writer.add_image(tag, t.unsqueeze(0))
+                import numpy as np
+                self.writer.add_histogram(tag, np.array(values), step)
             except Exception:
                 pass
 
-    def text(self, tag: str, s: str):
-        self._json[tag] = {"text": s}
+    def matrix(self, tag: str, mat: List[List[float]], xlabel: str = "", ylabel: str = "", step: int = 0):
+        """Logs a 2D matrix as a colored heatmap figure, falling back to a grayscale image."""
+        data = [[float(v) for v in row] for row in mat]
+        self._json.setdefault("matrices", {})[tag] = {"matrix": data, "xlabel": xlabel, "ylabel": ylabel}
+        
+        if not self.writer:
+            return
+            
+        try:
+            # Prefer rich matplotlib heatmaps if available
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            cax = ax.imshow(data, cmap='viridis', aspect='auto', interpolation='nearest')
+            fig.colorbar(cax)
+            if xlabel: 
+                ax.set_xlabel(xlabel)
+            if ylabel: 
+                ax.set_ylabel(ylabel)
+            ax.set_title(tag)
+            
+            self.writer.add_figure(tag, fig, global_step=step)
+            plt.close(fig)
+        except Exception:
+            # Fallback to basic grayscale image tensor
+            try:
+                import torch
+                t = torch.tensor(data, dtype=torch.float32)
+                t_min, t_max = t.min(), t.max()
+                t = (t - t_min) / (t_max - t_min + 1e-9)
+                self.writer.add_image(tag, t.unsqueeze(0), global_step=step)
+            except Exception:
+                pass
+
+    def embedding(self, tag: str, mat: List[List[float]], metadata: Optional[List[str]] = None, step: int = 0):
+        """Logs high-dimensional data for TensorBoard's Projector (PCA/UMAP)."""
+        self._json.setdefault("embeddings", {})[tag] = {"matrix": mat, "metadata": metadata}
         if self.writer:
-            self.writer.add_text(tag, s)
+            try:
+                import torch
+                t = torch.tensor(mat, dtype=torch.float32)
+                self.writer.add_embedding(t, metadata=metadata, tag=tag, global_step=step)
+            except Exception:
+                pass
+
+    def hparams(self, hparam_dict: Dict[str, Union[int, float, str, bool]], metric_dict: Dict[str, float]):
+        """Logs hyperparameter configurations and their resulting metrics."""
+        self._json.setdefault("hparams", []).append({"hparams": hparam_dict, "metrics": metric_dict})
+        if self.writer:
+            try:
+                self.writer.add_hparams(hparam_dict, metric_dict)
+            except Exception:
+                pass
+
+    def text(self, tag: str, s: str, step: int = 0):
+        """Logs Markdown-formatted text to TensorBoard."""
+        self._json.setdefault("texts", {}).setdefault(tag, {})[str(step)] = s
+        if self.writer:
+            self.writer.add_text(tag, s, step)
 
     def flush(self):
         with open(os.path.join(self.logdir, "summaries.json"), "w") as f:
@@ -61,27 +125,65 @@ class Exporter:
         if self.writer:
             self.writer.flush()
 
+    def close(self):
+        """Safely close the TensorBoard writer."""
+        if self.writer:
+            self.writer.close()
 
-def export_store(store: EvidenceStore, exporter: Exporter, cfg=None):
-    # per-component scalars
+
+def export_store(store: EvidenceStore, exporter: Exporter, cfg=None, explanations: Optional[Dict[str, Explanation]] = None):
+    """Pipes EvidenceStore contents directly into TensorBoard's rich visualizers."""
+    explanations = explanations or {}
+    
+    # 1. Per-component scalars and text summaries
     for name, prof in store.profiles.items():
+        # Scalars
         for k, v in prof.feature_vector_fields().items():
             exporter.scalar(f"profile/{name}/{k}", v)
+            
+        # Rich Markdown summaries for TensorBoard Text tab
+        md_lines = [f"### {name}"]
+        
+        if name in explanations:
+            e = explanations[name]
+            md_lines.append(f"**Explanation:** {e.candidate_function} *(source: {e.source})*")
+            if e.relevant_contexts:
+                md_lines.append(f"**Contexts:** {', '.join(e.relevant_contexts)}")
+        
+        if prof.detector_labels:
+            md_lines.append(f"**Tags:** {', '.join(prof.detector_labels)}")
+            
+        if prof.top_examples:
+            md_lines.append("#### Top Activating Examples")
+            for i, ex in enumerate(prof.top_examples[:5]):
+                toks = ex.get("tokens", [])
+                pos = ex.get("position", -1)
+                act = ex.get("activation", 0.0)
+                # Markdown highlighting format for the specific token
+                highlighted = " ".join(f"**[{t}]**" if idx == pos else str(t) for idx, t in enumerate(toks))
+                md_lines.append(f"* **Act {act:.3f}**: `{highlighted}`")
+                
+        exporter.text(f"components/{name}", "\n\n".join(md_lines))
+
+    # 2. Evidence Record logging
     for rec in store.all_records():
         for k, v in rec.values.items():
             if isinstance(v, (int, float)):
                 exporter.scalar(
                     f"evidence/{rec.spec.method}/{'+'.join(c.name for c in rec.components)}/{k}",
-                    float(v))
-    # layer x head matrices for the headline numbers
+                    float(v)
+                )
+                
+    # 3. Structural grids (Layer x Head heatmaps)
     if cfg is not None:
         for field, source in (("attn.induction", "profile"),
                               ("attn.prev_token", "profile"),
                               ("act.dla_logit_diff", "profile")):
             mat = [[store.profile(f"L{l}.H{h}").feature_vector_fields().get(field, 0.0)
                     for h in range(cfg.n_heads)] for l in range(cfg.n_layers)]
-            exporter.matrix(f"grid/{field}", mat, xlabel="head", ylabel="layer")
-    exporter.flush()
+            # Uses matplotlib rendering internally for gorgeous heatmaps
+            exporter.matrix(f"grid/{field}", mat, xlabel="Head", ylabel="Layer")
+            
 
 
 # ------------------------------------------------------------- inspection view

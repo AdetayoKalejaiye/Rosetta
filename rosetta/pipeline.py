@@ -51,6 +51,49 @@ from .stone.mapfile import RosettaMap
 from .stone.verify import circuit_faithfulness, run_prediction
 
 
+def run_export(out_dir: str, cfg=None) -> Dict:
+    """Re-run just the export step (step 12) on an already-computed run.
+
+    Reads the existing store and rosetta map from *out_dir* and regenerates:
+    - TensorBoard event file (stale events in tb/ are replaced)
+    - summaries.json
+    - inspection.html
+    - rosetta_map.md
+
+    `cfg` is the model config object used for layer×head heatmaps; omit it and
+    the grid section is skipped (everything else still exports fine).
+    """
+    store = EvidenceStore(os.path.join(out_dir, "store"))
+
+    map_path = os.path.join(out_dir, "rosetta_map.json")
+    rosetta_map = RosettaMap(map_path)
+    explanations: Dict[str, "Explanation"] = {
+        name: entry.explanation for name, entry in rosetta_map.entries.items()
+    }
+
+    exporter = Exporter(os.path.join(out_dir, "tb"))
+    export_store(store, exporter, cfg, explanations=explanations)
+    exporter.flush()
+    exporter.close()
+
+    html_path = os.path.join(out_dir, "inspection.html")
+    write_inspection_html(store, explanations, html_path,
+                          related=_related_from_clusters(store))
+
+    md = rosetta_map.render_markdown()
+    md_path = os.path.join(out_dir, "rosetta_map.md")
+    with open(md_path, "w") as f:
+        f.write(md)
+
+    return {
+        "store_root": store.root,
+        "inspection_html": html_path,
+        "map_json": map_path,
+        "map_markdown": md_path,
+        "tensorboard_logdir": exporter.logdir,
+    }
+
+
 def _add(store: EvidenceStore, rec) -> None:
     store.add(rec)
     for c in rec.components:
@@ -231,9 +274,9 @@ def run_pipeline(adapter: ModelAdapter,
     log("[12/12] export: TensorBoard/json, inspection HTML, map")
     store.save_profiles()
     exporter = Exporter(os.path.join(out_dir, "tb"))
-    export_store(store, exporter, cfg)
+    export_store(store, exporter, cfg, explanations=explanations)
     exporter.flush()
-
+    exporter.close()
     html_path = os.path.join(out_dir, "inspection.html")
     write_inspection_html(store, explanations, html_path,
                           related=_related_from_clusters(store))

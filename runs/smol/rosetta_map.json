@@ -13,7 +13,9 @@
         "9116b85d140c",
         "2fae3f1e9c55",
         "e889fe0fc51d",
-        "a8e7c3fc2f0f"
+        "a8e7c3fc2f0f",
+        "938ca5abbd5f",
+        "ec0045ae1dcd"
       ],
       "contradictions": [
         "ablation baselines disagree: zero_ablation=-1.060, mean_ablation=-3.014, resample_ablation=-3.824"
@@ -49,10 +51,23 @@
         "tolerance": 0.05,
         "measured": -2.958163261413574,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L31.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 1.2054115295410157,
+        "tolerance": 0.05,
+        "measured": -2.958163261413574,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414014.7196805
+    "confidence": 0.75,
+    "updated_at": 1791434134.338748
   },
   {
     "component": "L30.H6",
@@ -106,10 +121,23 @@
         "tolerance": 0.05,
         "measured": -1.5111446380615234,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L30.H6"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.5437347412109376,
+        "tolerance": 0.05,
+        "measured": -1.5111446380615234,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414019.265099
+    "confidence": 0.75,
+    "updated_at": 1791434145.6032834
   },
   {
     "component": "L27.MLP",
@@ -125,7 +153,9 @@
         "a8f3f2bce9c1",
         "8be7607af1d8",
         "ccbb396b9886",
-        "36eabe1dcc3e"
+        "36eabe1dcc3e",
+        "2a0c95c671e8",
+        "860071fe7bfe"
       ],
       "contradictions": [],
       "predictions": [
@@ -159,10 +189,23 @@
         "tolerance": 0.05,
         "measured": -0.9347906112670898,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L27.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.28739585876464846,
+        "tolerance": 0.05,
+        "measured": -0.9347906112670898,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414023.8123174
+    "confidence": 0.75,
+    "updated_at": 1791434156.1525037
   },
   {
     "component": "L30.MLP",
@@ -178,7 +221,9 @@
         "f1cf23a6a32f",
         "9e20c4f52d4e",
         "eed9914977ad",
-        "74ea2c4c5a0b"
+        "74ea2c4c5a0b",
+        "7940ba2e2af7",
+        "fc5fe81c49bc"
       ],
       "contradictions": [
         "ablation baselines disagree: zero_ablation=-1.651, mean_ablation=-0.847, resample_ablation=-0.959"
@@ -214,10 +259,23 @@
         "tolerance": 0.05,
         "measured": -1.2927112579345703,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L30.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.3386192321777344,
+        "tolerance": 0.05,
+        "measured": -1.2927112579345703,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414028.3122947
+    "confidence": 0.75,
+    "updated_at": 1791434166.2446585
   },
   {
     "component": "L28.MLP",
@@ -233,7 +291,9 @@
         "4eb6f8205752",
         "05835ef761d2",
         "e3c2b75b673d",
-        "c33f20948ad1"
+        "c33f20948ad1",
+        "c2685891ddaf",
+        "b48742dd53cc"
       ],
       "contradictions": [
         "ablation baselines disagree: zero_ablation=-0.060, mean_ablation=-0.635, resample_ablation=-0.838"
@@ -269,10 +329,23 @@
         "tolerance": 0.05,
         "measured": -1.0064067840576172,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L28.MLP"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.25392723083496094,
+        "tolerance": 0.05,
+        "measured": -1.0064067840576172,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414032.8054073
+    "confidence": 0.75,
+    "updated_at": 1791434176.4183683
   },
   {
     "component": "L27.H7",
@@ -324,10 +397,23 @@
         "tolerance": 0.15,
         "measured": -0.2978553771972656,
         "passed": false
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L27.H7"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "no_change",
+        "min_abs_effect": 0.0,
+        "tolerance": 0.15,
+        "measured": -0.2978553771972656,
+        "passed": false
       }
     ],
-    "confidence": 0.3333333333333333,
-    "updated_at": 1790414037.3432891
+    "confidence": 0.25,
+    "updated_at": 1791434186.536867
   },
   {
     "component": "L28.H8",
@@ -379,10 +465,23 @@
         "tolerance": 0.15,
         "measured": 0.6784229278564453,
         "passed": false
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L28.H8"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "no_change",
+        "min_abs_effect": 0.0,
+        "tolerance": 0.15,
+        "measured": 0.6784229278564453,
+        "passed": false
       }
     ],
-    "confidence": 0.3333333333333333,
-    "updated_at": 1790414041.9057322
+    "confidence": 0.25,
+    "updated_at": 1791434196.8951142
   },
   {
     "component": "L24.H11",
@@ -434,9 +533,22 @@
         "tolerance": 0.05,
         "measured": -0.2886505126953125,
         "passed": true
+      },
+      {
+        "method": "mean_ablation",
+        "components": [
+          "L24.H11"
+        ],
+        "family": "induction-heldout",
+        "metric": "logit_diff",
+        "expected_direction": "decrease",
+        "min_abs_effect": 0.08307266235351562,
+        "tolerance": 0.05,
+        "measured": -0.2886505126953125,
+        "passed": true
       }
     ],
-    "confidence": 0.6666666666666666,
-    "updated_at": 1790414046.4171565
+    "confidence": 0.75,
+    "updated_at": 1791434207.1472423
   }
 ]

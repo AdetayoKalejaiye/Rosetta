@@ -1,0 +1,2 @@
+[console_scripts]
+rosetta = rosetta.cli:main
