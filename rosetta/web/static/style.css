@@ -86,6 +86,28 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   font-variant-numeric: tabular-nums;
 }
 
+.model-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.model-status .dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--baseline);
+  flex: none;
+}
+.model-status.loaded { color: var(--text-secondary); }
+.model-status.loaded .dot { background: var(--good); }
+.model-status.loading .dot {
+  background: var(--warning);
+  animation: blink 1s ease-in-out infinite;
+}
+@keyframes blink { 50% { opacity: 0.3; } }
+
 .ghost-btn {
   padding: 5px 11px;
   background: transparent;

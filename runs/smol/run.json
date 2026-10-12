@@ -1,0 +1,16 @@
+{
+  "model": {
+    "id": "HuggingFaceTB/SmolLM2-360M",
+    "kind": "hf"
+  },
+  "arch": {
+    "n_layers": 32,
+    "n_heads": 15,
+    "n_kv_heads": 5,
+    "d_model": 960,
+    "vocab_size": 49152
+  },
+  "seed": null,
+  "top_k": null,
+  "created_at": 1791788754.185044
+}

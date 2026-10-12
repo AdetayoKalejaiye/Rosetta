@@ -1,0 +1,17 @@
+{
+  "model": {
+    "id": "toy-gqa",
+    "kind": "toy",
+    "train_steps": 400
+  },
+  "arch": {
+    "n_layers": 3,
+    "n_heads": 6,
+    "n_kv_heads": 2,
+    "d_model": 64,
+    "vocab_size": 64
+  },
+  "seed": null,
+  "top_k": null,
+  "created_at": 1791788804.7294786
+}

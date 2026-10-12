@@ -317,16 +317,21 @@ class ToyAdapter(ModelAdapter):
 class HFAdapter(ModelAdapter):
     """Adapter for HuggingFace Llama-family checkpoints (SmolLM2, Llama, ...).
 
-    NOTE: written to the same interface but intentionally not exercised in
-    this build (constraint: no runs against a real model). When you do point
-    it at SmolLM2-360M, remember its GQA layout: 15 query heads sharing 5 KV
-    heads per layer, so kv_head interventions hit 3 query heads at once.
+    Note the GQA layout when interpreting results: SmolLM2-360M has 15 query
+    heads sharing 5 KV heads per layer, so a kv_head intervention hits 3 query
+    heads at once.
     """
 
     @classmethod
     def from_pretrained(cls, name_or_path: str, device="cpu", dtype=torch.float32):
         from transformers import AutoModelForCausalLM, AutoTokenizer  # lazy
-        model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype, attn_implementation="eager")
+        # transformers renamed torch_dtype -> dtype in 5.x
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                name_or_path, dtype=dtype, attn_implementation="eager")
+        except TypeError:
+            model = AutoModelForCausalLM.from_pretrained(
+                name_or_path, torch_dtype=dtype, attn_implementation="eager")
         model.to(device)
         hc = model.config
         cfg = ModelConfig(

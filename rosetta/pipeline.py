@@ -136,6 +136,10 @@ def run_pipeline(adapter: ModelAdapter,
     train, heldout, ref = families["train"], families["heldout"], families["reference"]
     cfg = adapter.cfg
 
+    # Record which model produced this run so it can be reloaded later.
+    from .web.runs import write_manifest
+    write_manifest(out_dir, adapter, seed=seed, top_k=top_k)
+
     # 1. weights ------------------------------------------------------------
     log("[1/12] weight analysis")
     run_weight_analysis(adapter, store)

@@ -34,6 +34,7 @@ const el$ = {
   gridScroll: $("grid-scroll"), tableHost: $("table-host"),
   emptyState: $("empty-state"), viewToggle: $("view-toggle"),
   clearFocus: $("clear-focus"), tooltip: $("tooltip"),
+  modelStatus: $("model-status"),
   detailEmpty: $("detail-empty"), detailContent: $("detail-content"),
   messages: $("messages"), chatForm: $("chat-form"), chatInput: $("chat-input"),
 };
@@ -118,26 +119,61 @@ async function init() {
   await selectRun(S.runs[0].id);
 }
 
+// After an intervention appends evidence, pull the run again but keep the
+// current metric, filters and selection in place.
+async function refreshRun() {
+  if (!S.run) return;
+  const keep = {
+    metric: S.metric, labels: new Set(S.activeLabels),
+    focus: new Set(S.focus), selected: S.selected,
+  };
+  const [data, runs] = await Promise.all([
+    fetch(`/api/runs/${S.run.id}`).then(x => x.json()),
+    fetch("/api/runs").then(x => x.json()),
+  ]);
+  S.run = data;
+  S.runs = runs.runs;
+  buildMetricSelect();
+  buildLabelBar();
+  if (keep.metric && keep.metric in data.metrics) {
+    S.metric = keep.metric;
+    el$.metricSelect.value = keep.metric;
+  }
+  S.activeLabels = keep.labels;
+  S.focus = keep.focus;
+  S.selected = keep.selected;
+  el$.labelBar.querySelectorAll(".chip").forEach(c =>
+    c.setAttribute("aria-pressed", S.activeLabels.has(c.dataset.label)));
+  setRunMeta();
+  renderModelStatus();
+  render();
+  if (S.selected) selectComponent(S.selected);
+}
+
+function setRunMeta() {
+  const s = S.runs.find(x => x.id === S.run.id) || {};
+  el$.runMeta.textContent =
+    `${S.run.n_layers} layers x ${S.run.n_heads} heads · ` +
+    `${Object.keys(S.run.components).length} components · ` +
+    `${(s.n_evidence || 0).toLocaleString()} evidence records` +
+    (s.n_explanations ? ` · ${s.n_explanations} explanations` : "");
+}
+
 async function selectRun(id) {
   const data = await fetch(`/api/runs/${id}`).then(x => x.json());
   S.run = data;
   S.activeLabels.clear();
   S.focus.clear();
   S.selected = null;
+  S.modelLoaded = false;   // selecting a run drops any loaded adapter
   el$.runSelect.value = id;
   el$.clearFocus.classList.add("hidden");
   showDetailEmpty();
 
-  const summary = S.runs.find(x => x.id === id) || {};
-  el$.runMeta.textContent =
-    `${data.n_layers} layers x ${data.n_heads} heads · ` +
-    `${Object.keys(data.components).length} components · ` +
-    `${(summary.n_evidence || 0).toLocaleString()} evidence records` +
-    (summary.n_explanations
-      ? ` · ${summary.n_explanations} explanations` : "");
-
+  setRunMeta();
   buildMetricSelect();
   buildLabelBar();
+  renderModelStatus();
   render();
   if (S.ws && S.ws.readyState === WebSocket.OPEN) {
     S.ws.send(JSON.stringify({ type: "select_run", run_id: id }));
@@ -145,6 +181,22 @@ async function selectRun(id) {
 }
 
 el$.runSelect.addEventListener("change", e => selectRun(e.target.value));
+
+// Model is only needed for new interventions, so say plainly whether it is
+// loaded and which checkpoint the run points at.
+function renderModelStatus(state) {
+  const m = (S.run && S.run.manifest && S.run.manifest.model) || {};
+  const id = m.id || "unknown checkpoint";
+  const short = id.includes("/") ? id.split("/").pop() : id;
+  const cls = state || (S.modelLoaded ? "loaded" : "");
+  const verb = state === "loading" ? "loading"
+             : cls === "loaded" ? "loaded" : "not loaded";
+  el$.modelStatus.className = "model-status " + cls;
+  el$.modelStatus.innerHTML = `<span class="dot"></span>${esc(short)} · ${verb}`;
+  el$.modelStatus.title = m.inferred
+    ? `${id} (inferred from the run's shape; confirmed once it loads)`
+    : `${id} (recorded in run.json)`;
+}
 
 // --------------------------------------------------------- metric select
 function buildMetricSelect() {
@@ -470,6 +522,13 @@ function onWsMessage(m) {
     addMsg(m.message, m.sender, m.mentions);
   } else if (m.type === "status") {
     showStatus(m.message);
+    if (/^Loading |^Rebuilding /.test(m.message)) renderModelStatus("loading");
+    if (/^Model ready/.test(m.message)) {
+      S.modelLoaded = true;
+      renderModelStatus("loaded");
+    }
+  } else if (m.type === "run_updated") {
+    refreshRun();
   } else if (m.type === "focus") {
     S.focus = new Set(m.components || []);
     if (m.metric && m.metric in S.run.metrics) {

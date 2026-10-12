@@ -48,8 +48,9 @@ plainly that the run contains no evidence that could support such a claim, \
 and offer what the evidence *can* answer instead. Do not invent a story.
 - A detector label is a heuristic threshold, not proof. Say so when it matters.
 - Ablation baselines disagreeing is a real finding — surface it, don't hide it.
-- Interventions need the original checkpoint. Only the toy run can be rebuilt \
-locally; for other runs explain that and stick to the recorded evidence.
+- Interventions load the run's model and take roughly 10s per component on a \
+360M model. Run them when they answer the question; say what you are about to \
+do first. They append new evidence to the run.
 
 ## Formatting
 Your reply renders in a narrow side panel. Never use markdown tables — they \
@@ -112,7 +113,7 @@ TOOLS = [
     },
     {
         "name": "run_ablation",
-        "description": "NEW intervention: ablate components and measure the effect. Requires rebuilding the model — only works on the toy run. Use recorded evidence instead where possible.",
+        "description": "NEW intervention: ablate the named components and measure the effect on the metric. Loads the run's model on first use, then ~10s per component. Appends new evidence to the run. Prefer recorded evidence when it already answers the question.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -124,7 +125,7 @@ TOOLS = [
     },
     {
         "name": "run_activation_patching",
-        "description": "NEW intervention: patch activations between clean and corrupt runs. Requires rebuilding the model — toy run only.",
+        "description": "NEW intervention: patch activations between clean and corrupt runs. Loads the run's model on first use, then ~10s per component. Appends new evidence to the run.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -210,6 +211,12 @@ class RosettaAgent:
             if response.get("stop_reason") != "tool_use":
                 break
 
+            # Interventions take seconds to minutes; report from the worker
+            # thread rather than going silent.
+            def progress(text):
+                asyncio.run_coroutine_threadsafe(
+                    send({"type": "status", "message": text}), loop)
+
             results = []
             for block in content:
                 if block["type"] != "tool_use":
@@ -218,13 +225,16 @@ class RosettaAgent:
                             "message": _label(block["name"])})
                 try:
                     out = await loop.run_in_executor(
-                        None, lambda b=block: self._exec(b["name"], b["input"]))
+                        None, lambda b=block: self._exec(
+                            b["name"], b["input"], progress))
                 except Exception as e:
                     out = {"error": str(e)}
                 if out.get("_focus"):
                     await send({"type": "focus",
                                 "components": out.pop("_focus"),
                                 "metric": out.pop("_metric", None)})
+                if out.pop("_store_changed", False):
+                    await send({"type": "run_updated"})
                 results.append({"type": "tool_result",
                                 "tool_use_id": block["id"],
                                 "content": json.dumps(out, default=str)[:60000]})
@@ -238,7 +248,8 @@ class RosettaAgent:
 
     # ------------------------------------------------------------------ tools
 
-    def _exec(self, name: str, inp: Dict) -> Dict:
+    def _exec(self, name: str, inp: Dict, progress=None) -> Dict:
+        say = progress or (lambda _m: None)
         fn = {
             "get_run_summary": lambda: self._summary(),
             "query_components": lambda: self._query(inp),
@@ -247,9 +258,9 @@ class RosettaAgent:
             "compare_components": lambda: self._compare(
                 inp["components"], inp.get("metrics")),
             "run_ablation": lambda: self._ablation(
-                inp["components"], inp.get("baseline", "mean")),
+                inp["components"], inp.get("baseline", "mean"), say),
             "run_activation_patching": lambda: self._patch(
-                inp["components"], inp.get("direction", "denoising")),
+                inp["components"], inp.get("direction", "denoising"), say),
         }.get(name)
         return fn() if fn else {"error": f"Unknown tool: {name}"}
 
@@ -349,31 +360,37 @@ class RosettaAgent:
         return {"comparison": table,
                 "_focus": [c for c in comps if c in r["components"]]}
 
-    def _ablation(self, comps: List[str], baseline: str) -> Dict:
+    def _ablation(self, comps: List[str], baseline: str, say) -> Dict:
         from ..methods.ablation import ablate
         from ..schema import Component
         s = self.session
-        s.ensure_model()
+        s.ensure_model(progress=say)
         out = {}
-        for n in comps:
+        for i, n in enumerate(comps, 1):
+            say(f"Ablating {n} ({baseline}) — {i}/{len(comps)}")
             rec = ablate(s.adapter, s.families["train"], Component.parse(n),
                          baseline, ref_fam=s.families["reference"])
             s.store.add(rec)
             out[n] = {k: round(float(v), 5) for k, v in rec.values.items()}
-        return {"baseline": baseline, "results": out, "_focus": list(out)}
+        return {"baseline": baseline, "results": out,
+                "recorded_to": s.store.root,
+                "_focus": list(out), "_store_changed": True}
 
-    def _patch(self, comps: List[str], direction: str) -> Dict:
+    def _patch(self, comps: List[str], direction: str, say) -> Dict:
         from ..methods.patching import activation_patch
         from ..schema import Component
         s = self.session
-        s.ensure_model()
+        s.ensure_model(progress=say)
         out = {}
-        for n in comps:
+        for i, n in enumerate(comps, 1):
+            say(f"Patching {n} ({direction}) — {i}/{len(comps)}")
             rec = activation_patch(s.adapter, s.families["train"],
                                    Component.parse(n), direction)
             s.store.add(rec)
             out[n] = {k: round(float(v), 5) for k, v in rec.values.items()}
-        return {"direction": direction, "results": out, "_focus": list(out)}
+        return {"direction": direction, "results": out,
+                "recorded_to": s.store.root,
+                "_focus": list(out), "_store_changed": True}
 
 
 def _label(tool: str) -> str:

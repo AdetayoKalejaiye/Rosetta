@@ -14,6 +14,65 @@ from typing import Dict, List, Optional
 
 _COMP_RE = re.compile(r"^L(\d+)\.(H(\d+)|KV(\d+)|MLP|RESID)$")
 
+MANIFEST = "run.json"
+
+# Fallback for runs made before manifests existed: (layers, q, kv) -> checkpoint.
+# Only used when run.json is absent, and always reported as inferred.
+KNOWN_SHAPES = {
+    (32, 15, 5): "HuggingFaceTB/SmolLM2-360M",
+    (24, 32, 32): "HuggingFaceTB/SmolLM2-1.7B",
+    (30, 9, 3): "HuggingFaceTB/SmolLM2-135M",
+}
+
+
+def write_manifest(out_dir: str, adapter, *, seed=None, top_k=None) -> Dict:
+    """Record which model produced a run, so it can be reloaded later."""
+    cfg = adapter.cfg
+    kind = "toy" if type(adapter).__name__ == "ToyAdapter" else "hf"
+    manifest = {
+        "model": {"id": adapter.name, "kind": kind},
+        "arch": {"n_layers": cfg.n_layers, "n_heads": cfg.n_heads,
+                 "n_kv_heads": cfg.n_kv_heads, "d_model": cfg.d_model,
+                 "vocab_size": cfg.vocab_size},
+        "seed": seed,
+        "top_k": top_k,
+        "created_at": __import__("time").time(),
+    }
+    if kind == "toy":
+        manifest["model"]["train_steps"] = 400
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, MANIFEST), "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
+
+
+def read_manifest(path: str, n_layers: int = 0, n_heads: int = 0,
+                  n_kv_heads: int = 0) -> Dict:
+    """Manifest for a run, or a shape-inferred guess for legacy runs."""
+    p = Path(path) / MANIFEST
+    if p.exists():
+        try:
+            with open(p) as f:
+                m = json.load(f)
+            m.setdefault("model", {})["inferred"] = False
+            return m
+        except Exception:
+            pass
+
+    # No manifest: infer. The toy is reproducible from code, so it needs no
+    # checkpoint; anything else has to be matched against known shapes.
+    if (n_layers, n_heads) == (3, 6):
+        return {"model": {"id": "toy-gqa", "kind": "toy", "train_steps": 400,
+                          "inferred": True},
+                "arch": {"n_layers": 3, "n_heads": 6}}
+    guess = KNOWN_SHAPES.get((n_layers, n_heads, n_kv_heads))
+    if not guess:
+        guess = next((v for (l, h, _), v in KNOWN_SHAPES.items()
+                      if (l, h) == (n_layers, n_heads)), None)
+    return {"model": {"id": guess, "kind": "hf" if guess else "unknown",
+                      "inferred": True},
+            "arch": {"n_layers": n_layers, "n_heads": n_heads}}
+
 # Signed metrics get a diverging scale; everything else is magnitude-only.
 SIGNED_METRICS = {
     "dla_logit_diff", "dla_score", "delta_logit_diff", "delta_answer_logprob",
@@ -57,7 +116,7 @@ def discover_runs(root: str = "runs") -> List[Dict]:
 def _summarize(d: Path, prof_path: Path) -> Dict:
     with open(prof_path) as f:
         profiles = json.load(f)
-    n_layers = n_heads = 0
+    n_layers = n_heads = n_kv = 0
     for p in profiles:
         parsed = _parse_component(p["component"])
         if not parsed:
@@ -65,6 +124,8 @@ def _summarize(d: Path, prof_path: Path) -> Dict:
         n_layers = max(n_layers, parsed["layer"] + 1)
         if parsed["kind"] == "head":
             n_heads = max(n_heads, parsed["index"] + 1)
+        elif parsed["kind"] == "kv_head":
+            n_kv = max(n_kv, parsed["index"] + 1)
 
     ev_path = d / "store" / "evidence.jsonl"
     n_evidence = 0
@@ -81,6 +142,7 @@ def _summarize(d: Path, prof_path: Path) -> Dict:
         except Exception:
             pass
 
+    manifest = read_manifest(str(d), n_layers, n_heads, n_kv)
     return {
         "id": d.name,
         "path": str(d),
@@ -89,6 +151,7 @@ def _summarize(d: Path, prof_path: Path) -> Dict:
         "n_profiles": len(profiles),
         "n_evidence": n_evidence,
         "n_explanations": n_entries,
+        "model": manifest.get("model", {}),
         "updated_at": prof_path.stat().st_mtime,
     }
 
@@ -103,7 +166,7 @@ def load_run(path: str) -> Dict:
     with open(d / "store" / "profiles.json") as f:
         raw_profiles = json.load(f)
 
-    n_layers = n_heads = 0
+    n_layers = n_heads = n_kv = 0
     components: Dict[str, Dict] = {}
     metrics: Dict[str, Dict] = {}
     labels: Dict[str, int] = {}
@@ -116,6 +179,8 @@ def load_run(path: str) -> Dict:
         n_layers = max(n_layers, parsed["layer"] + 1)
         if parsed["kind"] == "head":
             n_heads = max(n_heads, parsed["index"] + 1)
+        elif parsed["kind"] == "kv_head":
+            n_kv = max(n_kv, parsed["index"] + 1)
 
         stats: Dict[str, float] = {}
         for group, prefix in (("attention_stats", ""),
@@ -183,6 +248,7 @@ def load_run(path: str) -> Dict:
         "metrics": metrics,
         "labels": labels,
         "explanations": explanations,
+        "manifest": read_manifest(str(d), n_layers, n_heads, n_kv),
     }
 
 
