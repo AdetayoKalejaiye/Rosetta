@@ -212,6 +212,8 @@ def load_run(path: str) -> Dict:
     for key, slot in metrics.items():
         slot["signed"] = (key.lstrip("w.") in SIGNED_METRICS) or slot["min"] < 0
 
+    _add_population_stats(components, metrics)
+
     explanations = {}
     map_path = d / "rosetta_map.json"
     if map_path.exists():
@@ -249,7 +251,66 @@ def load_run(path: str) -> Dict:
         "labels": labels,
         "explanations": explanations,
         "manifest": read_manifest(str(d), n_layers, n_heads, n_kv),
+        # How much of the population each label covers: one that fires on
+        # most components is not telling you anything.
+        "label_coverage": {
+            lab: round(100 * n / max(1, sum(
+                1 for c in components.values() if c["kind"] == "head")), 1)
+            for lab, n in labels.items()
+        },
     }
+
+
+def _add_population_stats(components: Dict, metrics: Dict) -> None:
+    """Score every metric against its own population.
+
+    An absolute threshold tuned on a toy model does not transfer: in a real
+    model `sink_pos0` is high almost everywhere, so "above 0.5" labels 72% of
+    heads and says nothing. A z-score says how unusual a head is among its
+    peers, which is the question worth asking. Computed per component kind,
+    since heads and MLPs are not comparable.
+    """
+    by_kind: Dict[str, List[Dict]] = {}
+    for c in components.values():
+        by_kind.setdefault(c["kind"], []).append(c)
+
+    for kind, group in by_kind.items():
+        keys = {k for c in group for k in c["stats"]}
+        for key in keys:
+            vals = sorted(c["stats"][key] for c in group if key in c["stats"])
+            n = len(vals)
+            if n < 4:
+                continue
+            mean = sum(vals) / n
+            var = sum((v - mean) ** 2 for v in vals) / n
+            sd = var ** 0.5
+            for c in group:
+                if key not in c["stats"]:
+                    continue
+                v = c["stats"][key]
+                lo, hi = 0, n
+                while lo < hi:                       # rank among peers
+                    mid = (lo + hi) // 2
+                    if vals[mid] < v:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                c.setdefault("pct", {})[key] = round(100 * lo / max(1, n - 1), 1)
+                if sd > 1e-12:
+                    c.setdefault("z", {})[key] = round((v - mean) / sd, 3)
+
+    # Expose z-scores as selectable metrics so the grid can colour by
+    # "how unusual" rather than "how large".
+    for c in components.values():
+        for key, z in (c.get("z") or {}).items():
+            zk = f"z.{key}"
+            c["stats"][zk] = z
+            slot = metrics.setdefault(
+                zk, {"min": z, "max": z, "n": 0, "group": "population",
+                     "signed": True})
+            slot["min"] = min(slot["min"], z)
+            slot["max"] = max(slot["max"], z)
+            slot["n"] += 1
 
 
 def component_detail(path: str, comp: str) -> Dict:

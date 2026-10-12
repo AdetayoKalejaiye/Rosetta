@@ -229,15 +229,24 @@ function buildLabelBar() {
   labels.forEach(([name], i) => { S.labelColor[name] = CAT[i % CAT.length]; });
 
   if (!labels.length) { el$.labelBar.innerHTML = ""; return; }
+  // Coverage is shown because a label firing on most of the population is
+  // not evidence — attention_sink hits ~72% of heads in SmolLM2.
+  const cov = S.run.label_coverage || {};
   el$.labelBar.innerHTML =
     `<span class="field"><span>Detected</span></span>` +
-    labels.map(([name, n]) =>
-      `<button class="chip" type="button" data-label="${name}"
-               aria-pressed="false">
+    labels.map(([name, n]) => {
+      const pc = cov[name];
+      const noisy = pc !== undefined && pc >= 50;
+      return `<button class="chip${noisy ? " noisy" : ""}" type="button"
+               data-label="${name}" aria-pressed="false"
+               title="${pc !== undefined ? pc + "% of heads carry this label"
+                        : ""}${noisy ? " — too common to be informative" : ""}">
          <span class="dot" style="background:${S.labelColor[name]}"></span>
          ${name.replace(/_/g, " ")}
-         <span class="count">${n}</span>
-       </button>`).join("");
+         <span class="count">${n}${
+           pc !== undefined ? ` · ${Math.round(pc)}%` : ""}</span>
+       </button>`;
+    }).join("");
 
   el$.labelBar.querySelectorAll(".chip").forEach(chip => {
     chip.addEventListener("click", () => {
@@ -253,19 +262,22 @@ function buildLabelBar() {
 // ----------------------------------------------------------------- render
 function render() { S.tableView ? renderTable() : renderGrid(); renderLegend(); }
 
+// Guard the observer against re-entering on its own re-render.
+let fitting = false;
+
 function matchesLabels(c) {
   if (!S.activeLabels.size) return true;
   return c.labels.some(l => S.activeLabels.has(l));
 }
 
-function renderGrid() {
+function renderGrid(forcedSize, attempt = 0) {
   el$.gridScroll.classList.remove("hidden");
   el$.tableHost.classList.add("hidden");
 
   const { n_layers, n_heads, components } = S.run;
   const scale = S.metric ? scaleFor(S.metric) : null;
   const filtering = S.activeLabels.size > 0 || S.focus.size > 0;
-  const sz = cellSize(n_layers, n_heads);
+  const sz = forcedSize || cellSize(n_layers, n_heads);
   const showEveryCol = sz >= 18 ? 1 : 2;   // thin out tick labels when tiny
 
   let html = `<div class="axis-caption">Attention heads &rarr;` +
@@ -290,6 +302,18 @@ function renderGrid() {
   }
   html += `</tbody></table>`;
   el$.gridHost.innerHTML = html;
+
+  // A single measurement can be taken before the panel has settled (chips
+  // wrapping to a second row, fonts loading), so check the result against
+  // reality and correct once rather than trusting the first number.
+  if (attempt < 2) {
+    const avail = el$.gridScroll.clientHeight - 28;
+    const actual = el$.gridHost.getBoundingClientRect().height;
+    if (actual > avail + 2 && sz > 13) {
+      const next = Math.max(13, Math.floor(sz * (avail / actual)));
+      if (next < sz) return renderGrid(next, attempt + 1);
+    }
+  }
 
   el$.gridHost.querySelectorAll(".cell[data-comp]").forEach(cell => {
     cell.addEventListener("click", () => selectComponent(cell.dataset.comp));
@@ -468,11 +492,27 @@ async function selectComponent(name) {
   for (const [title, keys] of groups) {
     const present = keys.filter(k => k in c.stats);
     if (!present.length) continue;
-    html += `<div class="sect"><h4>${title}</h4><div class="kv">` +
-      present.map(k => `<div>${k.replace(/_/g," ")}</div>` +
-                       `<div>${fmt(c.stats[k])}</div>`).join("") +
-      `</div></div>`;
+    html += `<div class="sect"><h4>${title}` +
+      `<span class="h4-note">value · percentile among ${c.kind}s</span>` +
+      `</h4><div class="kv3">` +
+      present.map(k => {
+        const pct = c.pct && c.pct[k];
+        return `<div>${k.replace(/_/g," ")}</div>` +
+               `<div>${fmt(c.stats[k])}</div>` +
+               `<div class="${pctClass(pct)}">${
+                  pct === undefined ? "—" : pct + "%"}</div>`;
+      }).join("") + `</div></div>`;
   }
+
+  if (c.kind === "head") {
+    html += `<div class="sect"><h4>Attention pattern</h4>` +
+      `<button class="ghost-btn" id="attn-btn">Show where this head looks` +
+      `</button><div id="attn-slot"></div></div>`;
+  }
+
+  html += `<div class="sect"><h4>Top activating examples</h4>` +
+    `<div class="prose" id="ex-slot">${
+      c.n_examples ? `Loading ${c.n_examples}…` : "None recorded."}</div></div>`;
 
   html += `<div class="sect"><h4>Evidence</h4>` +
     `<div class="prose" id="ev-slot">Loading ${c.n_evidence} records…</div>` +
@@ -480,9 +520,16 @@ async function selectComponent(name) {
   el$.detailContent.innerHTML = html;
   el$.detailContent.scrollTop = 0;
 
+  const attnBtn = document.getElementById("attn-btn");
+  if (attnBtn) attnBtn.addEventListener("click", () => showAttention(name));
+
   const detail = await fetch(
     `/api/runs/${S.run.id}/component/${encodeURIComponent(name)}`
   ).then(x => x.json());
+  if (S.selected !== name) return;      // user moved on while we fetched
+
+  renderExamples(detail);
+
   const slot = document.getElementById("ev-slot");
   if (!slot) return;
   const recs = detail.evidence || [];
@@ -504,6 +551,96 @@ async function selectComponent(name) {
              `<td style="color:var(--text-secondary)">${esc(spec)}</td>` +
              `<td class="num">${k ? `${esc(k)} ${fmt(r.values[k])}` : "—"}</td></tr>`;
     }).join("") + `</tbody></table>`;
+}
+
+const pctClass = (p) =>
+  p === undefined ? "pct" : p >= 95 ? "pct hi" : p >= 80 ? "pct mid" : "pct";
+
+const trim = (t) => (t === undefined || t === null) ? "" :
+  String(t).replace(/\n/g, "\\n").slice(0, 14);
+
+// The scalar grid says *that* a head does induction; the token x token
+// pattern shows *how*. Needs the model, so it sits behind a button.
+async function showAttention(name, example = 0) {
+  const slot = document.getElementById("attn-slot");
+  const btn = document.getElementById("attn-btn");
+  if (!slot) return;
+  slot.innerHTML = `<div class="prose">Loading attention — this loads the ` +
+                   `model on first use.</div>`;
+  if (btn) btn.disabled = true;
+
+  let d;
+  try {
+    const res = await fetch("/api/attention", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ component: name, example }),
+    });
+    d = await res.json();
+    if (!res.ok) throw new Error(d.detail || "request failed");
+  } catch (e) {
+    slot.innerHTML = `<div class="callout fail">${esc(e.message)}</div>`;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (btn) btn.remove();
+  S.modelLoaded = true;
+  renderModelStatus("loaded");
+
+  const toks = d.tokens, n = toks.length;
+  const sz = Math.max(6, Math.min(18, Math.floor(300 / n)));
+  let max = 0;
+  d.pattern.forEach(r => r.forEach(v => { if (v > max) max = v; }));
+  max = max || 1;
+
+  let h = `<div class="attn-meta">example ${d.example + 1} of ${d.n_examples}` +
+          ` · <code>${esc(d.family)}</code> · rows = query, cols = key</div>`;
+  h += `<div class="attn-wrap"><table class="attn" style="--c:${sz}px">`;
+  for (let q = 0; q < n; q++) {
+    h += `<tr><th>${esc(trim(toks[q]))}</th>`;
+    for (let k = 0; k < n; k++) {
+      const v = d.pattern[q][k];
+      const bg = k > q ? "transparent" : seqColor(v / max);
+      h += `<td title="${esc(trim(toks[q]))} → ${esc(trim(toks[k]))} : ` +
+           `${v.toFixed(4)}" style="background:${bg}"></td>`;
+    }
+    h += `</tr>`;
+  }
+  h += `</table></div><div class="attn-nav">` +
+       `<button class="ghost-btn" data-ex="${Math.max(0, d.example - 1)}"` +
+       `${d.example === 0 ? " disabled" : ""}>Prev</button>` +
+       `<button class="ghost-btn" data-ex="${
+          Math.min(d.n_examples - 1, d.example + 1)}"` +
+       `${d.example >= d.n_examples - 1 ? " disabled" : ""}>Next</button></div>`;
+  slot.innerHTML = h;
+  slot.querySelectorAll(".attn-nav button").forEach(b =>
+    b.addEventListener("click", () => showAttention(name, +b.dataset.ex)));
+}
+
+// Stored examples carry raw token ids; the server decodes them when a
+// tokenizer exists, so show the window with the peak position marked.
+function renderExamples(detail) {
+  const slot = document.getElementById("ex-slot");
+  if (!slot) return;
+  const exs = ((detail.profile || {}).top_examples || []).slice(0, 5);
+  if (!exs.length) { slot.textContent = "None recorded."; return; }
+
+  slot.innerHTML = exs.map(ex => {
+    const strs = ex.token_strs, pos = ex.position;
+    let body;
+    if (strs && strs.length) {
+      const lo = Math.max(0, pos - 8), hi = Math.min(strs.length, pos + 4);
+      body = strs.slice(lo, hi).map((t, i) =>
+        `<span class="tok${lo + i === pos ? " peak" : ""}">${esc(t)}</span>`
+      ).join("");
+    } else {
+      body = `<em>tokens ${esc((ex.tokens || [])
+        .slice(Math.max(0, pos - 6), pos + 2).join(", "))} — no tokenizer ` +
+        `for this run</em>`;
+    }
+    return `<div class="ex"><div class="ex-head">activation ${
+      fmt(ex.activation)} · position ${pos}</div>` +
+      `<div class="ex-body">${body}</div></div>`;
+  }).join("");
 }
 
 // -------------------------------------------------------------- chat / ws
@@ -611,7 +748,9 @@ el$.chatForm.addEventListener("submit", e => {
   const t = el$.chatInput.value.trim();
   if (!t) return;
   addMsg(t, "user");
-  S.ws.send(JSON.stringify({ type: "chat", message: t }));
+  // Tell the agent what is on screen, so "what about this one?" resolves.
+  S.ws.send(JSON.stringify({ type: "chat", message: t,
+                             selected: S.selected || null }));
   el$.chatInput.value = "";
 });
 
@@ -625,11 +764,26 @@ function switchTab(name) {
 document.querySelectorAll(".tab").forEach(t =>
   t.addEventListener("click", () => switchTab(t.dataset.tab)));
 
-let resizeTimer = null;
-addEventListener("resize", () => {
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (S.run && !S.tableView) renderGrid(); }, 120);
-});
+// Cell size is derived from the panel's measured height, so anything that
+// reflows the panel (chips wrapping onto a second row, a window resize) has
+// to re-run the fit. Observing the container makes this self-correcting
+// rather than dependent on render order.
+let fitTimer = null, lastFit = "";
+const refit = () => {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    if (!S.run || S.tableView || fitting) return;
+    const box = el$.gridScroll.getBoundingClientRect();
+    const sig = `${Math.round(box.width)}x${Math.round(box.height)}`;
+    if (sig === lastFit) return;
+    lastFit = sig;
+    fitting = true;
+    renderGrid();
+    fitting = false;
+  }, 80);
+};
+addEventListener("resize", refit);
+if (window.ResizeObserver) new ResizeObserver(refit).observe(el$.gridScroll);
 
 init();
 })();

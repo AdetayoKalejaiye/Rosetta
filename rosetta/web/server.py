@@ -33,6 +33,30 @@ class Session:
     families: Optional[Dict] = None
     store: Any = None
     candidates: List = field(default_factory=list)
+    tokenizer: Any = None
+    custom_families: Dict = field(default_factory=dict)
+
+    def ensure_tokenizer(self):
+        """Tokenizer only — much cheaper than loading the whole model."""
+        if self.tokenizer is not None:
+            return self.tokenizer
+        info = (self.run_data or {}).get("manifest", {}).get("model", {})
+        if info.get("kind") != "hf" or not info.get("id"):
+            raise RuntimeError(
+                "Real-text prompts need a tokenizer, which the toy model does "
+                "not have — its vocabulary is 64 arbitrary symbols. Switch to "
+                "a run backed by a real checkpoint.")
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(info["id"])
+        return self.tokenizer
+
+    def resolve_family(self, name: Optional[str]):
+        """A built-in split, or one the agent built from real sentences."""
+        if name and name in self.custom_families:
+            return self.custom_families[name]
+        if not self.families:
+            raise RuntimeError("Model not loaded")
+        return self.families.get(name or "train", self.families["train"])
 
     @property
     def run_path(self) -> Optional[str]:
@@ -42,13 +66,19 @@ class Session:
         path = os.path.join(self.runs_root, run_id)
         if not os.path.isdir(path):
             raise FileNotFoundError(run_id)
+        changed = run_id != self.run_id
         self.run_id = run_id
         self.run_data = load_run(path)
-        # a newly selected run invalidates any loaded model state
-        self.adapter = None
-        self.families = None
-        self.store = None
-        self.candidates = []
+        # Re-reading the same run (e.g. refreshing after an intervention
+        # appended evidence) must not discard the loaded model or the prompt
+        # families built against it — only an actual run switch invalidates.
+        if changed:
+            self.adapter = None
+            self.families = None
+            self.store = None
+            self.candidates = []
+            self.tokenizer = None
+            self.custom_families = {}
         return self.run_data
 
     @property
@@ -124,6 +154,15 @@ class Session:
         say(f"Model ready: {self.adapter.name}")
 
 
+def _token_labels(session, ids: List[int]) -> List[str]:
+    """Readable token strings when a tokenizer exists, else bare ids."""
+    try:
+        tk = session.tokenizer or session.ensure_tokenizer()
+        return [tk.decode([i]) for i in ids]
+    except Exception:
+        return [str(i) for i in ids]
+
+
 def _load_dotenv():
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     if env_path.exists():
@@ -176,14 +215,59 @@ def create_app(runs_root: str = "runs") -> FastAPI:
             raise HTTPException(400, str(e))
         return session.model_status
 
+    @app.post("/api/attention")
+    async def attention(body: Dict):
+        """Token x token attention for one head. Needs the model loaded."""
+        comp = body.get("component", "")
+        example = int(body.get("example", 0))
+        fam_name = body.get("family")
+        if not session.run_data:
+            raise HTTPException(400, "No run selected")
+
+        def work():
+            import torch
+            from ..schema import Component
+            session.ensure_model()
+            c = Component.parse(comp)
+            if c.kind != "head":
+                raise RuntimeError(f"{comp} is not an attention head")
+            fam = session.resolve_family(fam_name)
+            idx = max(0, min(example, fam.n - 1))
+            toks = fam.clean[idx:idx + 1]
+            with torch.no_grad():
+                pats = session.adapter.attention_patterns(toks)
+            pat = pats[c.layer, 0, c.index]           # [S, S]
+            labels = _token_labels(session, toks[0].tolist())
+            return {"component": comp, "layer": c.layer, "head": c.index,
+                    "family": fam.name, "example": idx,
+                    "n_examples": fam.n,
+                    "tokens": labels,
+                    "pattern": [[round(float(v), 5) for v in row]
+                                for row in pat.tolist()]}
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, work)
+        except Exception as e:
+            raise HTTPException(400, str(e))
+
     @app.get("/api/runs/{run_id}/component/{comp}")
     async def get_component(run_id: str, comp: str):
         path = os.path.join(session.runs_root, run_id)
         if not os.path.isdir(path):
             raise HTTPException(404, f"No such run: {run_id}")
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
+        detail = await loop.run_in_executor(
             None, lambda: component_detail(path, comp))
+
+        # Stored examples are raw token ids; decode them if we can so the
+        # highlighted window is actually readable.
+        if run_id == session.run_id:
+            for ex in (detail.get("profile") or {}).get("top_examples", []):
+                if ex.get("tokens"):
+                    ex["token_strs"] = await loop.run_in_executor(
+                        None, lambda t=ex["tokens"]: _token_labels(session, t))
+        return detail
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
@@ -198,7 +282,11 @@ def create_app(runs_root: str = "runs") -> FastAPI:
             while True:
                 msg = json.loads(await ws.receive_text())
                 if msg["type"] == "chat":
-                    await agent.handle_message(msg["message"], send)
+                    text = msg["message"]
+                    if msg.get("selected"):
+                        text += (f"\n\n[The user currently has "
+                                 f"{msg['selected']} selected in the grid.]")
+                    await agent.handle_message(text, send)
                 elif msg["type"] == "select_run":
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(

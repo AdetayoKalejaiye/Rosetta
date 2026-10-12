@@ -118,6 +118,80 @@ def build_induction_family(vocab_size: int, n: int = 32, seq_len: int = 24,
     )
 
 
+# ------------------------------------------------------- real-text families
+
+
+def build_text_family(tokenizer, items: List[Dict], name: str = "custom",
+                      description: str = "", corruption: str = "",
+                      ) -> Dict:
+    """Build a PromptFamily from real sentences instead of random tokens.
+
+    `items` is a list of {clean, corrupt, answer, distractor} strings. A pair
+    is usable only if clean and corrupt tokenize to the same length (so the
+    two runs stay position-aligned) and the answer/distractor are each a
+    single token (so they index a logit). Unusable pairs are returned in
+    `rejected` with a reason rather than silently dropped.
+
+    Shorter prompts are left-padded, which keeps the scored position at index
+    -1 and keeps the padding identical across the clean/corrupt pair, so it
+    cancels in every difference metric the methods compute.
+    """
+    kept, rejected = [], []
+    for i, it in enumerate(items):
+        clean_s, corrupt_s = it.get("clean", ""), it.get("corrupt", "")
+        ans_s, dis_s = it.get("answer", ""), it.get("distractor", "")
+        c = tokenizer.encode(clean_s, add_special_tokens=False)
+        k = tokenizer.encode(corrupt_s, add_special_tokens=False)
+        a = tokenizer.encode(ans_s, add_special_tokens=False)
+        d = tokenizer.encode(dis_s, add_special_tokens=False)
+        if len(c) != len(k):
+            rejected.append({"index": i, "clean": clean_s,
+                             "reason": f"clean is {len(c)} tokens but corrupt "
+                                       f"is {len(k)} — swap a word that "
+                                       "tokenizes to the same length"})
+            continue
+        if len(a) != 1 or len(d) != 1:
+            rejected.append({"index": i, "clean": clean_s,
+                             "reason": f"answer {ans_s!r} is {len(a)} tokens "
+                                       f"and distractor {dis_s!r} is {len(d)}"
+                                       " — both must be exactly 1 (try a "
+                                       "leading space)"})
+            continue
+        if a[0] == d[0]:
+            rejected.append({"index": i, "clean": clean_s,
+                             "reason": "answer and distractor are the same token"})
+            continue
+        kept.append((c, k, a[0], d[0], it))
+
+    if not kept:
+        raise ValueError("no usable prompt pairs; " +
+                         "; ".join(r["reason"] for r in rejected[:3]))
+
+    S = max(len(c) for c, *_ in kept)
+    pad = (getattr(tokenizer, "pad_token_id", None)
+           or getattr(tokenizer, "bos_token_id", None)
+           or getattr(tokenizer, "eos_token_id", None) or 0)
+
+    def pad_left(ids):
+        return [pad] * (S - len(ids)) + list(ids)
+
+    clean = torch.tensor([pad_left(c) for c, *_ in kept], dtype=torch.long)
+    corrupt = torch.tensor([pad_left(k) for _, k, *_ in kept], dtype=torch.long)
+    answer = torch.tensor([a for _, _, a, _, _ in kept], dtype=torch.long)
+    distractor = torch.tensor([d for _, _, _, d, _ in kept], dtype=torch.long)
+    texts = [it["clean"] for _, _, _, _, it in kept]
+
+    fam = PromptFamily(
+        name=name,
+        description=description or f"{len(kept)} real-text prompt pairs",
+        corruption=corruption or "single-word swap, token-length matched",
+        clean=clean, corrupt=corrupt, answer=answer, distractor=distractor,
+        texts=texts,
+    )
+    return {"family": fam, "n_kept": len(kept), "rejected": rejected,
+            "seq_len": S, "padded": sum(1 for c, *_ in kept if len(c) < S)}
+
+
 def build_task_suite(vocab_size: int, seed: int = 0) -> Dict[str, PromptFamily]:
     """train family, held-out family (same distribution, new samples), and a
     reference family (for mean/resample baselines, per the brief: a separate
