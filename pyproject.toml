@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 tb = ["tensorboard>=2.14"]          # optional: JSON summaries are always written
 hf = ["transformers>=4.40"]         # optional: HFAdapter (untested path)
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [project.scripts]
 rosetta = "rosetta.cli:main"

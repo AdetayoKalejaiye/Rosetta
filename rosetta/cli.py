@@ -40,6 +40,23 @@ def _demo(args) -> int:
     return 0
 
 
+def _export(args) -> int:
+    from .pipeline import run_export
+    result = run_export(args.out)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _serve(args) -> int:
+    import uvicorn
+    from .web.server import create_app
+
+    app = create_app(out_dir=args.out, auto_load_toy=not args.no_auto_load)
+    print(f"Rosetta web UI: http://{args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def _run_hf(args) -> int:
     from .model import HFAdapter
     from .pipeline import run_pipeline
@@ -71,6 +88,10 @@ def main(argv=None) -> int:
     d.add_argument("--sae", action="store_true", help="include the SAE stage")
     d.set_defaults(fn=_demo)
 
+    e = sub.add_parser("export", help="re-run export step on an existing run (no model needed)")
+    e.add_argument("--out", required=True, help="run directory, e.g. runs/smol")
+    e.set_defaults(fn=_export)
+
     r = sub.add_parser("run", help="HuggingFace checkpoint (untested path)")
     r.add_argument("--model", required=True,
                    help="e.g. HuggingFaceTB/SmolLM2-360M (32L, 15Q/5KV heads)")
@@ -81,6 +102,14 @@ def main(argv=None) -> int:
                    choices=["auto", "template", "llm"])
     r.add_argument("--sae", action="store_true")
     r.set_defaults(fn=_run_hf)
+
+    s = sub.add_parser("serve", help="launch the Rosetta web UI")
+    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--port", type=int, default=8742)
+    s.add_argument("--out", default="runs/web")
+    s.add_argument("--no-auto-load", action="store_true",
+                   help="don't auto-load the toy model on startup")
+    s.set_defaults(fn=_serve)
 
     args = p.parse_args(argv)
     return args.fn(args)

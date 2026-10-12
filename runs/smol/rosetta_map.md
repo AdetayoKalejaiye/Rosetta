@@ -2,11 +2,6 @@
 
 Confidence = Laplace-smoothed prediction pass rate; entries with failed predictions keep them in their history.
 
-## Proposed circuit
-- components: L31.MLP, L30.H6, L27.MLP, L30.MLP, L28.MLP, L27.H7, L28.H8, L24.H11
-- baseline for outside-ablation: mean
-- behavior retention: -0.01
-
 ## L31.MLP  (confidence 0.75, 2 passed / 0 failed)
 **Candidate function:** writes directly in the answer-token direction at the final position
 **Contexts:** (contexts not yet narrowed - see next_experiment)
