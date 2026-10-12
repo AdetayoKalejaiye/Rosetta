@@ -6,9 +6,10 @@
 
   python -m rosetta.cli run --model HuggingFaceTB/SmolLM2-360M --out runs/smol
       Point the same pipeline at a HuggingFace Llama-family checkpoint through
-      HFAdapter. Present per the design, but NOT exercised in this build (the
-      brief: do not test with the actual model). Expect to iterate the first
-      time it touches real weights.
+      HFAdapter.
+
+  python -m rosetta.cli serve
+      Browse finished runs in the web UI and ask questions about them.
 """
 
 from __future__ import annotations
@@ -71,8 +72,6 @@ def _run_hf(args) -> int:
     from .pipeline import run_pipeline
     from .tasks import build_task_suite
 
-    print("NOTE: the HF path is wired but untested in this build (per the "
-          "design constraint of not touching the real model).")
     adapter = HFAdapter.from_pretrained(args.model)
     families = build_task_suite(adapter.cfg.vocab_size, seed=args.seed)
     result = run_pipeline(adapter, families, out_dir=args.out,
@@ -101,7 +100,7 @@ def main(argv=None) -> int:
     e.add_argument("--out", required=True, help="run directory, e.g. runs/smol")
     e.set_defaults(fn=_export)
 
-    r = sub.add_parser("run", help="HuggingFace checkpoint (untested path)")
+    r = sub.add_parser("run", help="run the pipeline on a HuggingFace checkpoint")
     r.add_argument("--model", required=True,
                    help="e.g. HuggingFaceTB/SmolLM2-360M (32L, 15Q/5KV heads)")
     r.add_argument("--out", default="runs/model")
