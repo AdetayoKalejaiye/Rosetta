@@ -1,66 +1,76 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rosetta</title>
-    <link rel="stylesheet" href="/static/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rosetta</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <header>
-        <div class="logo">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="10" stroke="var(--accent)" stroke-width="2"/>
-                <circle cx="12" cy="12" r="4" fill="var(--accent)"/>
-                <line x1="12" y1="2" x2="12" y2="8" stroke="var(--accent)" stroke-width="2"/>
-                <line x1="12" y1="16" x2="12" y2="22" stroke="var(--accent)" stroke-width="2"/>
-                <line x1="2" y1="12" x2="8" y2="12" stroke="var(--accent)" stroke-width="2"/>
-                <line x1="16" y1="12" x2="22" y2="12" stroke="var(--accent)" stroke-width="2"/>
-            </svg>
-            <span>Rosetta</span>
-        </div>
-        <div class="header-controls">
-            <span id="model-badge" class="badge">No model</span>
-            <span id="status-indicator" class="status-dot"></span>
-        </div>
-    </header>
 
-    <main>
-        <section id="chat-panel">
-            <div id="messages"></div>
-            <form id="chat-form">
-                <input type="text" id="chat-input"
-                       placeholder="Ask about the model's internals..."
-                       autocomplete="off">
-                <button type="submit" id="send-btn" aria-label="Send">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                        <path d="M3 10L17 3L10 17L9 11L3 10Z"
-                              fill="var(--accent)"/>
-                    </svg>
-                </button>
-            </form>
-        </section>
+<header>
+  <div class="brand">Rosetta</div>
+  <label class="field">
+    <span>Run</span>
+    <select id="run-select"></select>
+  </label>
+  <div id="run-meta" class="meta"></div>
+  <div class="spacer"></div>
+  <button id="view-toggle" class="ghost-btn" type="button">Table view</button>
+</header>
 
-        <section id="viz-panel">
-            <div id="viz-header">
-                <span>Model Architecture</span>
-                <select id="metric-select">
-                    <option value="none">No overlay</option>
-                </select>
-            </div>
-            <div id="model-viz">
-                <svg id="model-svg" xmlns="http://www.w3.org/2000/svg"></svg>
-            </div>
-            <div id="detail-panel" class="hidden">
-                <div id="detail-header">
-                    <span id="detail-title"></span>
-                    <button id="detail-close" aria-label="Close">&times;</button>
-                </div>
-                <div id="detail-content"></div>
-            </div>
-        </section>
-    </main>
+<main>
+  <!-- ----------------------------------------------------------- grid -->
+  <section id="grid-panel">
+    <div class="panel-bar">
+      <label class="field">
+        <span>Colour by</span>
+        <select id="metric-select"></select>
+      </label>
+      <div id="scale-legend" class="scale-legend"></div>
+      <div class="spacer"></div>
+      <button id="clear-focus" class="ghost-btn hidden" type="button">
+        Clear highlight
+      </button>
+    </div>
 
-    <script src="/static/app.js"></script>
+    <div id="label-bar" class="label-bar"></div>
+
+    <div id="grid-scroll">
+      <div id="grid-host"></div>
+      <div id="empty-state" class="empty hidden"></div>
+    </div>
+
+    <div id="table-host" class="hidden"></div>
+  </section>
+
+  <!-- ------------------------------------------------------- side panel -->
+  <section id="side-panel">
+    <nav class="tabs">
+      <button class="tab active" data-tab="detail">Component</button>
+      <button class="tab" data-tab="chat">Ask</button>
+    </nav>
+
+    <div id="tab-detail" class="tab-body">
+      <div id="detail-empty" class="empty">
+        Select a cell in the grid to inspect a component.
+      </div>
+      <div id="detail-content"></div>
+    </div>
+
+    <div id="tab-chat" class="tab-body hidden">
+      <div id="messages"></div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" type="text"
+               placeholder="Which heads do induction?">
+        <button type="submit" id="send-btn">Ask</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<div id="tooltip" class="tooltip hidden"></div>
+
+<script src="/static/app.js"></script>
 </body>
 </html>

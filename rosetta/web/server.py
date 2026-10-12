@@ -1,7 +1,8 @@
 """FastAPI server for the Rosetta web interface.
 
-Serves the frontend, manages model state, and routes WebSocket messages
-to the agent for LLM-driven interpretability analysis.
+Run-first: finished runs are read straight off disk as JSON, so the UI is
+populated the moment it opens. A torch model is loaded only when the user
+asks for a new intervention.
 """
 from __future__ import annotations
 
@@ -12,64 +13,70 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import torch
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+from .runs import component_detail, discover_runs, load_run
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
 @dataclass
 class Session:
+    runs_root: str = "runs"
+    run_id: Optional[str] = None
+    run_data: Optional[Dict] = None
+
+    # only populated when a live intervention is requested
     adapter: Any = None
     families: Optional[Dict] = None
     store: Any = None
-    out_dir: str = "runs/web"
     candidates: List = field(default_factory=list)
 
-    def load_toy_model(self, steps: int = 400, seed: int = 0):
-        from ..model import ModelConfig, ToyAdapter, ToyGQATransformer, train_toy_on_induction
-        from ..store import EvidenceStore
-        from ..tasks import build_task_suite
-
-        torch.manual_seed(seed)
-        cfg = ModelConfig(vocab_size=64, d_model=64, n_layers=3,
-                          n_heads=6, n_kv_heads=2)
-        model = ToyGQATransformer(cfg)
-        train_toy_on_induction(model, steps=steps, seed=seed)
-        self.adapter = ToyAdapter(model)
-        self.families = build_task_suite(cfg.vocab_size, seed=seed)
-        os.makedirs(self.out_dir, exist_ok=True)
-        self.store = EvidenceStore(os.path.join(self.out_dir, "store"))
-
-    def load_hf_model(self, name_or_path: str, seed: int = 0):
-        from ..model import HFAdapter
-        from ..store import EvidenceStore
-        from ..tasks import build_task_suite
-
-        self.adapter = HFAdapter.from_pretrained(name_or_path)
-        self.families = build_task_suite(self.adapter.cfg.vocab_size, seed=seed)
-        os.makedirs(self.out_dir, exist_ok=True)
-        self.store = EvidenceStore(os.path.join(self.out_dir, "store"))
-
     @property
-    def model_info(self) -> Dict:
-        if not self.adapter:
-            return {"loaded": False}
-        cfg = self.adapter.cfg
-        return {
-            "loaded": True,
-            "name": self.adapter.name,
-            "n_layers": cfg.n_layers,
-            "n_heads": cfg.n_heads,
-            "n_kv_heads": cfg.n_kv_heads,
-            "d_model": cfg.d_model,
-            "vocab_size": cfg.vocab_size,
-            "head_dim": cfg.head_dim,
-            "group_size": cfg.group_size,
-        }
+    def run_path(self) -> Optional[str]:
+        return self.run_data["path"] if self.run_data else None
+
+    def select_run(self, run_id: str) -> Dict:
+        path = os.path.join(self.runs_root, run_id)
+        if not os.path.isdir(path):
+            raise FileNotFoundError(run_id)
+        self.run_id = run_id
+        self.run_data = load_run(path)
+        # a newly selected run invalidates any loaded model state
+        self.adapter = None
+        self.families = None
+        self.store = None
+        self.candidates = []
+        return self.run_data
+
+    def ensure_model(self):
+        """Load a torch model for the selected run. Expensive; opt-in."""
+        if self.adapter is not None:
+            return
+        import torch
+        from ..model import (ModelConfig, ToyAdapter, ToyGQATransformer,
+                             train_toy_on_induction)
+        from ..store import EvidenceStore
+        from ..tasks import build_task_suite
+
+        if self.run_data and self.run_data["n_layers"] == 3 \
+                and self.run_data["n_heads"] == 6:
+            torch.manual_seed(0)
+            cfg = ModelConfig(vocab_size=64, d_model=64, n_layers=3,
+                              n_heads=6, n_kv_heads=2)
+            model = ToyGQATransformer(cfg)
+            train_toy_on_induction(model, steps=400, seed=0)
+            self.adapter = ToyAdapter(model)
+        else:
+            raise RuntimeError(
+                "Live interventions on this run need its original checkpoint. "
+                "Only the toy model can be rebuilt locally; for "
+                f"'{self.run_id}' re-run the CLI pipeline instead.")
+
+        self.families = build_task_suite(self.adapter.cfg.vocab_size, seed=0)
+        self.store = EvidenceStore(os.path.join(self.run_path, "store"))
 
 
 def _load_dotenv():
@@ -82,35 +89,38 @@ def _load_dotenv():
                 os.environ.setdefault(key.strip(), value.strip())
 
 
-def create_app(out_dir: str = "runs/web", auto_load_toy: bool = True) -> FastAPI:
+def create_app(runs_root: str = "runs") -> FastAPI:
     _load_dotenv()
 
     app = FastAPI(title="Rosetta")
-    session = Session(out_dir=out_dir)
+    session = Session(runs_root=runs_root)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-    @app.on_event("startup")
-    async def startup():
-        if auto_load_toy:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, session.load_toy_model)
 
     @app.get("/")
     async def index():
         return FileResponse(STATIC_DIR / "index.html")
 
-    @app.get("/api/model")
-    async def model_info():
-        return session.model_info
+    @app.get("/api/runs")
+    async def list_runs():
+        return {"runs": discover_runs(session.runs_root),
+                "selected": session.run_id}
 
-    @app.get("/api/results")
-    async def results():
-        if not session.store:
-            return {"profiles": {}, "evidence": []}
-        profiles = {n: p.to_dict() for n, p in session.store.profiles.items()}
-        evidence = [r.to_dict() for r in session.store.all_records()]
-        return {"profiles": profiles, "evidence": evidence}
+    @app.get("/api/runs/{run_id}")
+    async def get_run(run_id: str):
+        try:
+            return session.select_run(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"No such run: {run_id}")
+
+    @app.get("/api/runs/{run_id}/component/{comp}")
+    async def get_component(run_id: str, comp: str):
+        path = os.path.join(session.runs_root, run_id)
+        if not os.path.isdir(path):
+            raise HTTPException(404, f"No such run: {run_id}")
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: component_detail(path, comp))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
@@ -121,36 +131,16 @@ def create_app(out_dir: str = "runs/web", auto_load_toy: bool = True) -> FastAPI
         async def send(msg: Dict):
             await ws.send_json(msg)
 
-        await send({"type": "model_info", "data": session.model_info})
-        if session.adapter:
-            await send({"type": "chat", "sender": "system",
-                        "message": f"Model loaded: **{session.adapter.name}** "
-                                   f"({session.adapter.cfg.n_layers}L, "
-                                   f"{session.adapter.cfg.n_heads} heads). "
-                                   "Ask me anything about its internals."})
-        else:
-            await send({"type": "chat", "sender": "system",
-                        "message": "No model loaded yet. Say 'load toy' to get started."})
-
         try:
             while True:
-                raw = await ws.receive_text()
-                msg = json.loads(raw)
-
+                msg = json.loads(await ws.receive_text())
                 if msg["type"] == "chat":
                     await agent.handle_message(msg["message"], send)
-                elif msg["type"] == "load":
-                    model = msg.get("model", "toy")
-                    await send({"type": "status", "message": f"Loading {model}..."})
+                elif msg["type"] == "select_run":
                     loop = asyncio.get_event_loop()
-                    if model == "toy":
-                        await loop.run_in_executor(None, session.load_toy_model)
-                    else:
-                        await loop.run_in_executor(
-                            None, lambda: session.load_hf_model(model))
-                    await send({"type": "model_info", "data": session.model_info})
-                    await send({"type": "chat", "sender": "system",
-                                "message": f"Model **{session.adapter.name}** loaded."})
+                    await loop.run_in_executor(
+                        None, lambda: session.select_run(msg["run_id"]))
+                    agent.reset()
         except WebSocketDisconnect:
             pass
 

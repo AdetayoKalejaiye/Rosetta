@@ -49,10 +49,19 @@ def _export(args) -> int:
 
 def _serve(args) -> int:
     import uvicorn
+    from .web.runs import discover_runs
     from .web.server import create_app
 
-    app = create_app(out_dir=args.out, auto_load_toy=not args.no_auto_load)
-    print(f"Rosetta web UI: http://{args.host}:{args.port}")
+    found = discover_runs(args.runs)
+    if found:
+        print(f"runs in {args.runs}/: " +
+              ", ".join(f"{r['id']} ({r['n_layers']}L x {r['n_heads']}H, "
+                        f"{r['n_evidence']} records)" for r in found))
+    else:
+        print(f"no runs found in {args.runs}/ — generate one with: "
+              "python -m rosetta.cli demo")
+    app = create_app(runs_root=args.runs)
+    print(f"Rosetta: http://localhost:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -103,12 +112,10 @@ def main(argv=None) -> int:
     r.add_argument("--sae", action="store_true")
     r.set_defaults(fn=_run_hf)
 
-    s = sub.add_parser("serve", help="launch the Rosetta web UI")
+    s = sub.add_parser("serve", help="browse runs in the web UI")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8742)
-    s.add_argument("--out", default="runs/web")
-    s.add_argument("--no-auto-load", action="store_true",
-                   help="don't auto-load the toy model on startup")
+    s.add_argument("--runs", default="runs", help="directory holding runs")
     s.set_defaults(fn=_serve)
 
     args = p.parse_args(argv)

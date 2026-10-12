@@ -1,8 +1,7 @@
 """Rosetta agent — LLM-driven interpretability orchestrator.
 
-Uses Claude API with tool use to interpret user requests and run the
-appropriate pipeline methods against the loaded model. Falls back to
-a simple command interface when no API key is available.
+Most questions are answered by querying the finished run's evidence, which
+needs no model. Only new interventions load torch, and only on request.
 """
 from __future__ import annotations
 
@@ -10,148 +9,135 @@ import asyncio
 import json
 import os
 import urllib.request
-from typing import Any, Callable, Coroutine, Dict, List
+from typing import Callable, Coroutine, Dict, List
+
+from .runs import component_detail
 
 SYSTEM_PROMPT = """\
-You are Rosetta, an AI assistant for mechanistic interpretability of neural networks.
-You help users understand what individual components (attention heads, MLP layers) \
-do inside transformer models. You have tools to run various interpretability \
-techniques against the currently loaded model.
+You are Rosetta, an assistant for mechanistic interpretability of transformers.
+A finished analysis run is loaded. Your job is to help the user find and \
+understand specific components (attention heads, MLP blocks) inside it.
 
-## Approach
-1. Identify what the user wants to find (which component, behavior, or circuit).
-2. Pick the right technique(s) from your tools.
-3. Run the analysis and interpret the results concisely.
-4. Suggest a follow-up experiment.
+## How to work
+1. Start from the evidence already in the run — `query_components` is your \
+workhorse. It filters by detector label and ranks by any recorded metric.
+2. Quote concrete component names (e.g. "L24.H11") and numbers. The UI \
+highlights every component you name, so name them explicitly.
+3. Explain what a number means, don't just report it.
+4. Suggest the next experiment.
 
-## Technique guide
-- **Profiling** — attention patterns (prev-token, induction, sink, entropy) and \
-activation stats. Run this first to see what each head does.
-- **DLA** — direct logit attribution: who writes toward the answer at the output. \
-Readout contribution, not a removal effect.
-- **Attribution screen** — fast gradient ranking of all components. Use to find \
-candidates, then verify with ablation.
-- **Ablation** — remove a component (zero/mean/resample baseline) and measure the \
-damage. Gold standard for causal importance. Different baselines can disagree—\
-that is informative.
-- **Activation patching** — transplant activations between clean and corrupt runs. \
-Denoising = measures sufficiency, noising = necessity.
-- **Detectors** — rule-based labels (induction head, prev-token head, etc.).
-- **Weight analysis** — structural view of weight norms, SVD, Q-composition.
+## Metrics you can rank by
+- `induction` — attends to the previous occurrence of the current token and \
+predicts what followed. The signature of an induction head.
+- `prev_token` — attends to the immediately preceding token.
+- `sink_pos0` — attention dumped on token 0. Usually an artifact, not a function.
+- `same_token`, `self_attn`, `entropy` (low entropy = focused attention).
+- `dla_logit_diff` — direct logit attribution; signed. Positive writes toward \
+the answer. This is a readout contribution, NOT a removal effect.
+- Activation stats: `mean`, `std`, `kurtosis`, `abs_max`, `sparsity`.
+- Weight stats are prefixed `w.` (e.g. `w.q_norm`, `w.ov_eff_rank`).
 
-## Important context
-- The toy model is a 3-layer GQA transformer trained on sequence repetition \
-(induction task). Its interesting components are induction heads and their \
-supporting circuitry.
-- GQA means multiple query heads share one KV head. Ablating a KV head hits \
-the whole group.
-- Always mention component names explicitly (e.g., "L2.H1") so the \
-visualization can highlight them.
-- Be concise. Report numbers, explain what they mean, suggest next steps.
-- If a request does not make sense for this model, explain why honestly.
+## Detector labels
+`induction_head`, `prev_token_head`, `attention_sink`, `same_token_head`, \
+`self_attending`, `focused_attention`, `direct_logit_writer_positive`.
+
+## Honesty rules
+- Small models do not have rich semantic features. If the user asks for a \
+"color head" or similar in a model trained only on sequence repetition, say \
+plainly that the run contains no evidence that could support such a claim, \
+and offer what the evidence *can* answer instead. Do not invent a story.
+- A detector label is a heuristic threshold, not proof. Say so when it matters.
+- Ablation baselines disagreeing is a real finding — surface it, don't hide it.
+- Interventions need the original checkpoint. Only the toy run can be rebuilt \
+locally; for other runs explain that and stick to the recorded evidence.
+
+## Formatting
+Your reply renders in a narrow side panel. Never use markdown tables — they \
+do not fit. For ranked results use one short line per item, e.g.
+`- L24.H10 — induction 0.437 (attention sink, focused)`
+Keep it to a few lines plus a short takeaway. No preamble.
 """
 
 TOOLS = [
     {
-        "name": "get_model_info",
-        "description": "Get architecture and config of the loaded model.",
+        "name": "get_run_summary",
+        "description": "Architecture, component counts, detector-label distribution, and every metric available in the loaded run with its value range. Call this first if unsure what the run contains.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "run_weight_analysis",
-        "description": "Analyze weight matrices: norms, SVD, Q-composition. Structural first look.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "run_profiling",
-        "description": "Profile attention patterns (prev-token, induction, sink, entropy) and activation stats for every head and MLP. Essential first step.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "run_dla",
-        "description": "Direct logit attribution: which components write toward the answer token. Positive = toward answer.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "run_attribution_screen",
-        "description": "Attribution patching + EAP-IG: cheaply rank all components by causal importance. Returns top-K candidates for further investigation.",
+        "name": "query_components",
+        "description": "Filter and rank components from the loaded run. The main way to answer 'which head does X'. Filter by detector label and/or component kind, rank by any metric.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "top_k": {"type": "integer", "description": "How many candidates (default 6)"},
+                "label": {"type": "string",
+                          "description": "Only components with this detector label"},
+                "kind": {"type": "string", "enum": ["head", "mlp", "kv_head", "resid"]},
+                "sort_by": {"type": "string",
+                            "description": "Metric to rank by, e.g. 'induction'"},
+                "descending": {"type": "boolean", "description": "Default true"},
+                "min_value": {"type": "number",
+                              "description": "Drop components below this sort_by value"},
+                "layer": {"type": "integer", "description": "Restrict to one layer"},
+                "limit": {"type": "integer", "description": "Max rows (default 20)"},
             },
             "required": [],
         },
     },
     {
-        "name": "run_ablation",
-        "description": "Ablate specific components (zero/mean/resample) and measure effect. Gold standard for causal importance.",
+        "name": "get_component",
+        "description": "Full detail for one component: all stats, detector labels, recorded evidence records with their exact method specs, disagreements, and any explanation entry.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "components": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "e.g. ['L2.H1', 'L1.MLP']",
-                },
-                "baseline": {
-                    "type": "string", "enum": ["zero", "mean", "resample"],
-                    "description": "Default: mean",
-                },
+                "component": {"type": "string", "description": "e.g. 'L24.H11'"},
+                "include_evidence": {"type": "boolean",
+                                     "description": "Include raw records (default true)"},
+            },
+            "required": ["component"],
+        },
+    },
+    {
+        "name": "compare_components",
+        "description": "Side-by-side metric comparison of several components.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "components": {"type": "array", "items": {"type": "string"}},
+                "metrics": {"type": "array", "items": {"type": "string"},
+                            "description": "Omit for the standard attention set"},
+            },
+            "required": ["components"],
+        },
+    },
+    {
+        "name": "run_ablation",
+        "description": "NEW intervention: ablate components and measure the effect. Requires rebuilding the model — only works on the toy run. Use recorded evidence instead where possible.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "components": {"type": "array", "items": {"type": "string"}},
+                "baseline": {"type": "string", "enum": ["zero", "mean", "resample"]},
             },
             "required": ["components"],
         },
     },
     {
         "name": "run_activation_patching",
-        "description": "Transplant activations between clean/corrupt runs. 'denoising'=sufficiency, 'noising'=necessity.",
+        "description": "NEW intervention: patch activations between clean and corrupt runs. Requires rebuilding the model — toy run only.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "components": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "Component names to patch",
-                },
-                "direction": {
-                    "type": "string", "enum": ["denoising", "noising"],
-                    "description": "Default: denoising",
-                },
+                "components": {"type": "array", "items": {"type": "string"}},
+                "direction": {"type": "string", "enum": ["denoising", "noising"]},
             },
             "required": ["components"],
         },
     },
-    {
-        "name": "run_detectors",
-        "description": "Rule-based pattern detectors: prev-token head, induction head, attention sink, etc. Requires profiling first.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "get_component_profile",
-        "description": "Full profile for one component: stats, evidence, labels, top activating examples.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "component": {"type": "string", "description": "e.g. 'L2.H1'"},
-            },
-            "required": ["component"],
-        },
-    },
-    {
-        "name": "list_components",
-        "description": "List all model components with analysis status and detector labels.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "run_full_pipeline",
-        "description": "Run the complete 12-stage Rosetta pipeline. Comprehensive but slower.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "top_k": {"type": "integer", "description": "Candidates to investigate (default 6)"},
-            },
-            "required": [],
-        },
-    },
 ]
+
+ATTENTION_METRICS = ["induction", "prev_token", "sink_pos0", "same_token",
+                     "self_attn", "entropy"]
 
 SendFn = Callable[[Dict], Coroutine]
 
@@ -170,11 +156,9 @@ def _call_api(messages: List[Dict], system: str) -> Dict:
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
+        headers={"Content-Type": "application/json",
+                 "x-api-key": api_key,
+                 "anthropic-version": "2023-06-01"},
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read())
@@ -186,16 +170,26 @@ class RosettaAgent:
         self.history: List[Dict] = []
         self._has_api = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
 
+    def reset(self):
+        self.history = []
+
     async def handle_message(self, user_msg: str, send: SendFn):
         if not self._has_api:
-            await self._command_fallback(user_msg, send)
+            await send({"type": "chat", "sender": "system",
+                        "message": "No `ANTHROPIC_API_KEY` found, so chat is "
+                                   "disabled. The run data and visualization "
+                                   "work without it."})
+            return
+        if not self.session.run_data:
+            await send({"type": "chat", "sender": "system",
+                        "message": "Select a run first."})
             return
 
         self.history.append({"role": "user", "content": user_msg})
         loop = asyncio.get_event_loop()
 
         while True:
-            await send({"type": "status", "message": "Thinking..."})
+            await send({"type": "status", "message": "Thinking"})
             try:
                 response = await loop.run_in_executor(
                     None, lambda: _call_api(self.history, SYSTEM_PROMPT))
@@ -210,280 +204,183 @@ class RosettaAgent:
             for block in content:
                 if block["type"] == "text" and block["text"].strip():
                     await send({"type": "chat", "sender": "agent",
-                                "message": block["text"]})
+                                "message": block["text"],
+                                "mentions": self._mentions(block["text"])})
 
             if response.get("stop_reason") != "tool_use":
                 break
 
-            tool_results = []
+            results = []
             for block in content:
                 if block["type"] != "tool_use":
                     continue
-                name, inp, tid = block["name"], block["input"], block["id"]
                 await send({"type": "status",
-                            "message": f"Running {_tool_label(name)}..."})
+                            "message": _label(block["name"])})
                 try:
-                    result = await loop.run_in_executor(
-                        None, lambda n=name, i=inp: self._exec(n, i))
-                    if result.get("highlights"):
-                        await send({"type": "results", "tool": name,
-                                    "highlights": result["highlights"]})
-                    tool_results.append({
-                        "type": "tool_result", "tool_use_id": tid,
-                        "content": json.dumps(result, default=str),
-                    })
+                    out = await loop.run_in_executor(
+                        None, lambda b=block: self._exec(b["name"], b["input"]))
                 except Exception as e:
-                    tool_results.append({
-                        "type": "tool_result", "tool_use_id": tid,
-                        "content": json.dumps({"error": str(e)}),
-                        "is_error": True,
-                    })
-            self.history.append({"role": "user", "content": tool_results})
+                    out = {"error": str(e)}
+                if out.get("_focus"):
+                    await send({"type": "focus",
+                                "components": out.pop("_focus"),
+                                "metric": out.pop("_metric", None)})
+                results.append({"type": "tool_result",
+                                "tool_use_id": block["id"],
+                                "content": json.dumps(out, default=str)[:60000]})
+            self.history.append({"role": "user", "content": results})
 
-    # ---------------------------------------------------------------------- tools
+    def _mentions(self, text: str) -> List[str]:
+        import re
+        comps = self.session.run_data["components"]
+        return sorted({m for m in re.findall(r"\bL\d+\.(?:H\d+|KV\d+|MLP|RESID)\b",
+                                             text) if m in comps})
+
+    # ------------------------------------------------------------------ tools
 
     def _exec(self, name: str, inp: Dict) -> Dict:
-        s = self.session
-        if not s.adapter and name != "get_model_info":
-            return {"error": "No model loaded. Ask the user to load one first."}
-        dispatch = {
-            "get_model_info": lambda: s.model_info,
-            "run_weight_analysis": self._weight_analysis,
-            "run_profiling": self._profiling,
-            "run_dla": self._dla,
-            "run_attribution_screen": lambda: self._attribution(inp.get("top_k", 6)),
+        fn = {
+            "get_run_summary": lambda: self._summary(),
+            "query_components": lambda: self._query(inp),
+            "get_component": lambda: self._component(
+                inp["component"], inp.get("include_evidence", True)),
+            "compare_components": lambda: self._compare(
+                inp["components"], inp.get("metrics")),
             "run_ablation": lambda: self._ablation(
                 inp["components"], inp.get("baseline", "mean")),
-            "run_activation_patching": lambda: self._patching(
+            "run_activation_patching": lambda: self._patch(
                 inp["components"], inp.get("direction", "denoising")),
-            "run_detectors": self._detectors,
-            "get_component_profile": lambda: self._profile(inp["component"]),
-            "list_components": self._list,
-            "run_full_pipeline": lambda: self._full_pipeline(inp.get("top_k", 6)),
+        }.get(name)
+        return fn() if fn else {"error": f"Unknown tool: {name}"}
+
+    def _summary(self) -> Dict:
+        r = self.session.run_data
+        kinds: Dict[str, int] = {}
+        for c in r["components"].values():
+            kinds[c["kind"]] = kinds.get(c["kind"], 0) + 1
+        return {
+            "run": r["id"],
+            "n_layers": r["n_layers"],
+            "n_heads_per_layer": r["n_heads"],
+            "component_kinds": kinds,
+            "detector_labels": r["labels"],
+            "metrics": {k: {"min": round(v["min"], 4),
+                            "max": round(v["max"], 4),
+                            "n": v["n"], "signed": v["signed"]}
+                        for k, v in r["metrics"].items()},
+            "explained_components": list(r["explanations"].keys()),
         }
-        fn = dispatch.get(name)
-        if not fn:
-            return {"error": f"Unknown tool: {name}"}
-        return fn()
 
-    def _weight_analysis(self) -> Dict:
-        from ..methods.weights import run_weight_analysis
-        s = self.session
-        run_weight_analysis(s.adapter, s.store)
-        hl = {}
-        for name, prof in s.store.profiles.items():
-            if prof.weight_stats:
-                hl[name] = {"weight_norm": prof.weight_stats.get("norm", 0)}
-        return {"status": "complete", "highlights": hl}
+    def _query(self, inp: Dict) -> Dict:
+        r = self.session.run_data
+        sort_by = inp.get("sort_by")
+        rows = []
+        for name, c in r["components"].items():
+            if inp.get("label") and inp["label"] not in c["labels"]:
+                continue
+            if inp.get("kind") and c["kind"] != inp["kind"]:
+                continue
+            if inp.get("layer") is not None and c["layer"] != inp["layer"]:
+                continue
+            val = c["stats"].get(sort_by) if sort_by else None
+            if sort_by and val is None:
+                continue
+            if inp.get("min_value") is not None and (
+                    val is None or val < inp["min_value"]):
+                continue
+            row = {"component": name, "layer": c["layer"],
+                   "labels": c["labels"], "n_evidence": c["n_evidence"]}
+            if sort_by:
+                row[sort_by] = round(val, 5)
+            else:
+                row.update({m: round(c["stats"][m], 4)
+                            for m in ATTENTION_METRICS if m in c["stats"]})
+            rows.append(row)
 
-    def _profiling(self) -> Dict:
-        from ..methods.profiling import run_profiling
-        s = self.session
-        run_profiling(s.adapter, s.families["train"], s.store)
-        hl = {}
-        for name, prof in s.store.profiles.items():
-            stats = {}
-            if prof.attention_stats:
-                stats.update(prof.attention_stats)
-            if prof.activation_stats:
-                stats.update(prof.activation_stats)
-            if stats:
-                hl[name] = stats
-        return {"status": "complete", "highlights": hl}
+        if sort_by:
+            rows.sort(key=lambda x: x[sort_by],
+                      reverse=inp.get("descending", True))
+        else:
+            rows.sort(key=lambda x: (x["layer"], x["component"]))
+        limit = inp.get("limit", 20)
+        out = {"n_matched": len(rows), "rows": rows[:limit]}
+        if rows[:limit]:
+            out["_focus"] = [x["component"] for x in rows[:limit]]
+            out["_metric"] = sort_by
+        return out
 
-    def _dla(self) -> Dict:
-        from ..methods.dla import run_dla
-        s = self.session
-        run_dla(s.adapter, s.families["train"], s.store)
-        hl = {}
-        for rec in s.store.by_method("dla"):
-            for comp in rec.components:
-                hl[comp.name] = dict(rec.values)
-        return {"status": "complete", "highlights": hl}
+    def _component(self, comp: str, include_evidence: bool) -> Dict:
+        r = self.session.run_data
+        c = r["components"].get(comp)
+        if not c:
+            return {"error": f"{comp} not in run {r['id']}"}
+        out = {"component": comp, "kind": c["kind"], "layer": c["layer"],
+               "index": c["index"], "labels": c["labels"],
+               "cluster": c["cluster"], "disagreements": c["disagreements"],
+               "stats": {k: round(v, 5) for k, v in c["stats"].items()}}
+        if comp in r["explanations"]:
+            out["explanation"] = r["explanations"][comp]
+        if include_evidence:
+            detail = component_detail(r["path"], comp)
+            out["evidence"] = [
+                {"method": rec["spec"]["method"],
+                 "baseline": rec["spec"].get("baseline"),
+                 "direction": rec["spec"].get("direction"),
+                 "metric": rec["spec"].get("metric"),
+                 "family": rec.get("family"),
+                 "values": rec["values"]}
+                for rec in detail["evidence"]
+            ]
+        out["_focus"] = [comp]
+        return out
 
-    def _attribution(self, top_k: int) -> Dict:
-        from ..methods.attribution import attribution_patching, eap_ig, rank_candidates
-        s = self.session
-        attribution_patching(s.adapter, s.families["train"], s.store)
-        eap_ig(s.adapter, s.families["train"], s.store, steps=5)
-        cands = rank_candidates(s.store, method="eap_ig", top_k=top_k)
-        if not cands:
-            cands = rank_candidates(s.store, method="attribution_patching",
-                                    top_k=top_k)
-        s.candidates = cands
-        hl = {}
-        for rec in s.store.by_method("eap_ig"):
-            for comp in rec.components:
-                val = rec.values.get("attribution",
-                                    rec.values.get("mean_grad", 0))
-                hl[comp.name] = {"attribution": abs(float(val))}
-        return {"status": "complete",
-                "candidates": [c.name for c in cands],
-                "highlights": hl}
+    def _compare(self, comps: List[str], metrics) -> Dict:
+        r = self.session.run_data
+        metrics = metrics or ATTENTION_METRICS
+        table = {}
+        for name in comps:
+            c = r["components"].get(name)
+            if not c:
+                table[name] = {"error": "not found"}
+                continue
+            table[name] = {m: round(c["stats"][m], 4)
+                           for m in metrics if m in c["stats"]}
+            table[name]["labels"] = c["labels"]
+        return {"comparison": table,
+                "_focus": [c for c in comps if c in r["components"]]}
 
-    def _ablation(self, names: List[str], baseline: str) -> Dict:
+    def _ablation(self, comps: List[str], baseline: str) -> Dict:
         from ..methods.ablation import ablate
         from ..schema import Component
         s = self.session
-        hl = {}
-        for n in names:
-            comp = Component.parse(n)
-            rec = ablate(s.adapter, s.families["train"], comp, baseline,
-                         ref_fam=s.families["reference"])
+        s.ensure_model()
+        out = {}
+        for n in comps:
+            rec = ablate(s.adapter, s.families["train"], Component.parse(n),
+                         baseline, ref_fam=s.families["reference"])
             s.store.add(rec)
-            hl[n] = {k: float(v) for k, v in rec.values.items()}
-        return {"status": "complete", "highlights": hl}
+            out[n] = {k: round(float(v), 5) for k, v in rec.values.items()}
+        return {"baseline": baseline, "results": out, "_focus": list(out)}
 
-    def _patching(self, names: List[str], direction: str) -> Dict:
+    def _patch(self, comps: List[str], direction: str) -> Dict:
         from ..methods.patching import activation_patch
         from ..schema import Component
         s = self.session
-        hl = {}
-        for n in names:
-            comp = Component.parse(n)
+        s.ensure_model()
+        out = {}
+        for n in comps:
             rec = activation_patch(s.adapter, s.families["train"],
-                                   comp, direction)
+                                   Component.parse(n), direction)
             s.store.add(rec)
-            hl[n] = {k: float(v) for k, v in rec.values.items()}
-        return {"status": "complete", "highlights": hl}
-
-    def _detectors(self) -> Dict:
-        from ..analyze.classify import run_detectors
-        s = self.session
-        if not s.store.profiles:
-            return {"error": "No profiles yet. Run profiling first."}
-        hl = {}
-        for name, prof in s.store.profiles.items():
-            run_detectors(prof)
-            if prof.detector_labels:
-                hl[name] = {"labels": list(prof.detector_labels)}
-        return {"status": "complete", "highlights": hl}
-
-    def _profile(self, name: str) -> Dict:
-        s = self.session
-        prof = s.store.profiles.get(name)
-        if not prof:
-            return {"error": f"No profile for {name}. Run profiling first."}
-        d = prof.to_dict()
-        d["evidence"] = [r.to_dict() for r in s.store.for_component(name)]
-        return d
-
-    def _list(self) -> Dict:
-        s = self.session
-        cfg = s.adapter.cfg
-        comps = []
-        for layer in range(cfg.n_layers):
-            for head in range(cfg.n_heads):
-                n = f"L{layer}.H{head}"
-                p = s.store.profiles.get(n)
-                comps.append({"name": n, "kind": "head",
-                              "analyzed": p is not None,
-                              "labels": p.detector_labels if p else [],
-                              "n_evidence": len(p.evidence_ids) if p else 0})
-            n = f"L{layer}.MLP"
-            p = s.store.profiles.get(n)
-            comps.append({"name": n, "kind": "mlp",
-                          "analyzed": p is not None,
-                          "labels": p.detector_labels if p else [],
-                          "n_evidence": len(p.evidence_ids) if p else 0})
-        return {"components": comps}
-
-    def _full_pipeline(self, top_k: int) -> Dict:
-        from ..pipeline import run_pipeline
-        from ..store import EvidenceStore
-        s = self.session
-        result = run_pipeline(s.adapter, s.families, s.out_dir, top_k=top_k)
-        s.store = EvidenceStore(os.path.join(s.out_dir, "store"))
-        hl = {}
-        for name, prof in s.store.profiles.items():
-            entry = {}
-            if prof.attention_stats:
-                entry.update(prof.attention_stats)
-            if prof.detector_labels:
-                entry["labels"] = list(prof.detector_labels)
-            if entry:
-                hl[name] = entry
-        return {"status": "complete", "pipeline_result": result,
-                "highlights": hl}
-
-    # ---------------------------------------------------------------------- fallback
-
-    async def _command_fallback(self, msg: str, send: SendFn):
-        msg = msg.strip()
-        if not msg.startswith("/"):
-            await send({"type": "chat", "sender": "system",
-                        "message": "No API key set — using command mode. "
-                                   "Type **/help** for commands."})
-            return
-        parts = msg[1:].split()
-        cmd, args = (parts[0] if parts else ""), parts[1:]
-        loop = asyncio.get_event_loop()
-        if cmd == "help":
-            await send({"type": "chat", "sender": "system",
-                        "message": "**Commands:** /profile, /dla, /screen, "
-                                   "/ablate L2.H1 [mean], /patch L2.H1 "
-                                   "[denoising], /detect, /list, /pipeline, "
-                                   "/info L2.H1"})
-        elif cmd == "profile":
-            r = await loop.run_in_executor(None, self._profiling)
-            await send({"type": "results", "tool": "run_profiling",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": "Profiling complete."})
-        elif cmd == "dla":
-            r = await loop.run_in_executor(None, self._dla)
-            await send({"type": "results", "tool": "run_dla",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": "DLA complete."})
-        elif cmd == "screen":
-            r = await loop.run_in_executor(None, lambda: self._attribution(6))
-            await send({"type": "results", "tool": "run_attribution_screen",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": f"Candidates: {r.get('candidates', [])}"})
-        elif cmd == "detect":
-            r = await loop.run_in_executor(None, self._detectors)
-            await send({"type": "results", "tool": "run_detectors",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": "Detectors complete."})
-        elif cmd == "list":
-            r = await loop.run_in_executor(None, self._list)
-            lines = [f"  {c['name']}: {', '.join(c['labels']) or '—'}"
-                     for c in r["components"]]
-            await send({"type": "chat", "sender": "system",
-                        "message": "**Components:**\n" + "\n".join(lines)})
-        elif cmd == "pipeline":
-            r = await loop.run_in_executor(None, lambda: self._full_pipeline(6))
-            await send({"type": "results", "tool": "run_full_pipeline",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": "Pipeline complete."})
-        elif cmd == "ablate" and args:
-            bl = args[1] if len(args) > 1 else "mean"
-            r = await loop.run_in_executor(
-                None, lambda: self._ablation([args[0]], bl))
-            await send({"type": "results", "tool": "run_ablation",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": f"Ablation result: {json.dumps(r.get('highlights', {}), indent=2)}"})
-        elif cmd == "patch" and args:
-            d = args[1] if len(args) > 1 else "denoising"
-            r = await loop.run_in_executor(
-                None, lambda: self._patching([args[0]], d))
-            await send({"type": "results", "tool": "run_activation_patching",
-                        "highlights": r.get("highlights", {})})
-            await send({"type": "chat", "sender": "system",
-                        "message": f"Patching result: {json.dumps(r.get('highlights', {}), indent=2)}"})
-        elif cmd == "info" and args:
-            r = await loop.run_in_executor(None, lambda: self._profile(args[0]))
-            await send({"type": "chat", "sender": "system",
-                        "message": f"```json\n{json.dumps(r, indent=2, default=str)}\n```"})
-        else:
-            await send({"type": "chat", "sender": "system",
-                        "message": f"Unknown command: **{cmd}**. Type /help."})
+            out[n] = {k: round(float(v), 5) for k, v in rec.values.items()}
+        return {"direction": direction, "results": out, "_focus": list(out)}
 
 
-def _tool_label(name: str) -> str:
-    return name.replace("run_", "").replace("_", " ")
+def _label(tool: str) -> str:
+    return {"get_run_summary": "Reading run summary",
+            "query_components": "Querying components",
+            "get_component": "Fetching component detail",
+            "compare_components": "Comparing components",
+            "run_ablation": "Running ablation",
+            "run_activation_patching": "Running activation patching",
+            }.get(tool, tool)
